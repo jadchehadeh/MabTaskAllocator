@@ -15,9 +15,6 @@ Passwords are stored with PostgreSQL `pgcrypto` hashes.
 
 ```text
 Superadmin: j.chehade@mabunited.com / jadjadjad1
-Super user: super.user@mabunited.com / super12345
-Admin: bilal@mabunited.com / bilal123
-Normal user: ali@mabunited.com / ali123
 ```
 
 ## Recreate Local Database

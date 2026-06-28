@@ -12,9 +12,11 @@ BEGIN
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'task_status') THEN
-    CREATE TYPE task_status AS ENUM ('new', 'assigned', 'in_progress', 'blocked', 'done');
+    CREATE TYPE task_status AS ENUM ('new', 'assigned', 'in_progress', 'blocked', 'under_review', 'done');
   END IF;
 END $$;
+
+ALTER TYPE task_status ADD VALUE IF NOT EXISTS 'under_review';
 
 CREATE TABLE IF NOT EXISTS departments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -97,9 +99,7 @@ EXECUTE FUNCTION set_updated_at();
 
 INSERT INTO departments (name)
 VALUES
-  ('Executive'),
-  ('Mechanical Technical office engineer'),
-  ('Electrical Technical office engineer')
+  ('Executive')
 ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO app_users (name, username, password_hash, role, department_id)
@@ -110,95 +110,5 @@ VALUES
     crypt('jadjadjad1', gen_salt('bf')),
     'superadmin',
     (SELECT id FROM departments WHERE name = 'Executive')
-  ),
-  (
-    'MAB Super User',
-    'super.user@mabunited.com',
-    crypt('super12345', gen_salt('bf')),
-    'admin',
-    (SELECT id FROM departments WHERE name = 'Electrical Technical office engineer')
-  ),
-  (
-    'Bilal',
-    'bilal@mabunited.com',
-    crypt('bilal123', gen_salt('bf')),
-    'admin',
-    (SELECT id FROM departments WHERE name = 'Mechanical Technical office engineer')
-  ),
-  (
-    'Ali',
-    'ali@mabunited.com',
-    crypt('ali123', gen_salt('bf')),
-    'user',
-    (SELECT id FROM departments WHERE name = 'Mechanical Technical office engineer')
-  ),
-  (
-    'Sara Ahmed',
-    'sara.ahmed@mabunited.com',
-    crypt('sara123', gen_salt('bf')),
-    'user',
-    (SELECT id FROM departments WHERE name = 'Mechanical Technical office engineer')
-  ),
-  (
-    'Maya Nasser',
-    'maya.nasser@mabunited.com',
-    crypt('maya123', gen_salt('bf')),
-    'user',
-    (SELECT id FROM departments WHERE name = 'Electrical Technical office engineer')
   )
 ON CONFLICT (username) DO NOTHING;
-
-INSERT INTO tasks (title, description, department_id, created_by_id, assigned_to_id, candidate_name, priority, status, progress, due_date)
-SELECT
-    'Prepare HVAC shop drawing package',
-    'Prepare the HVAC shop drawing package for consultant review.',
-    (SELECT id FROM departments WHERE name = 'Mechanical Technical office engineer'),
-    (SELECT id FROM app_users WHERE username = 'bilal@mabunited.com'),
-    (SELECT id FROM app_users WHERE username = 'ali@mabunited.com'),
-    'Ali',
-    'high',
-    'in_progress',
-    62,
-    DATE '2026-07-01'
-WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE title = 'Prepare HVAC shop drawing package');
-
-INSERT INTO tasks (title, description, department_id, created_by_id, assigned_to_id, candidate_name, priority, status, progress, due_date)
-SELECT
-    'Review electrical load schedule',
-    'Review and validate the electrical load schedule before submission.',
-    (SELECT id FROM departments WHERE name = 'Electrical Technical office engineer'),
-    (SELECT id FROM app_users WHERE username = 'super.user@mabunited.com'),
-    (SELECT id FROM app_users WHERE username = 'maya.nasser@mabunited.com'),
-    'Maya Nasser',
-    'medium',
-    'assigned',
-    35,
-    DATE '2026-07-03'
-WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE title = 'Review electrical load schedule');
-
-INSERT INTO tasks (title, description, department_id, created_by_id, assigned_to_id, candidate_name, priority, status, progress, due_date)
-SELECT
-    'Resolve MEP coordination comments',
-    'Resolve coordination comments related to the latest MEP clash report.',
-    (SELECT id FROM departments WHERE name = 'Mechanical Technical office engineer'),
-    (SELECT id FROM app_users WHERE username = 'j.chehade@mabunited.com'),
-    NULL,
-    'Unassigned',
-    'urgent',
-    'new',
-    0,
-    DATE '2026-06-30'
-WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE title = 'Resolve MEP coordination comments');
-
-INSERT INTO task_activity (task_id, actor_id, action, notes)
-SELECT
-  tasks.id,
-  tasks.created_by_id,
-  'created',
-  'Seeded from initial MAB Task Allocator setup.'
-FROM tasks
-WHERE NOT EXISTS (
-  SELECT 1
-  FROM task_activity
-  WHERE task_activity.task_id = tasks.id
-);

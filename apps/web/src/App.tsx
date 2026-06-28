@@ -1,13 +1,18 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  CheckCircle2,
   ClipboardList,
   Edit3,
   Gauge,
+  Hand,
   KeyRound,
   Lock,
   LogOut,
+  MessageSquare,
+  Paperclip,
   Plus,
+  RotateCcw,
   Save,
   Search,
   ShieldCheck,
@@ -32,6 +37,23 @@ type ManagedTask = {
   candidateName?: string;
   dueDate: string;
   progress: number;
+  reviewComment?: string;
+  files: TaskFile[];
+  messages: TaskMessage[];
+};
+
+type TaskFile = {
+  id: string;
+  name: string;
+  uploadedBy: string;
+  uploadedAt: string;
+};
+
+type TaskMessage = {
+  id: string;
+  authorName: string;
+  body: string;
+  createdAt: string;
 };
 
 const departments: DepartmentName[] = [
@@ -47,83 +69,16 @@ const seededUsers: AppUser[] = [
     password: "jadjadjad1",
     role: "superadmin",
     department: "Executive"
-  },
-  {
-    id: "user-bilal",
-    name: "Bilal",
-    username: "bilal@mabunited.com",
-    password: "bilal123",
-    role: "admin",
-    department: "Mechanical Technical office engineer"
-  },
-  {
-    id: "user-super-user",
-    name: "MAB Super User",
-    username: "super.user@mabunited.com",
-    password: "super12345",
-    role: "admin",
-    department: "Electrical Technical office engineer"
-  },
-  {
-    id: "user-ali",
-    name: "Ali",
-    username: "ali@mabunited.com",
-    password: "ali123",
-    role: "user",
-    department: "Mechanical Technical office engineer"
-  },
-  {
-    id: "user-sara",
-    name: "Sara Ahmed",
-    username: "sara.ahmed@mabunited.com",
-    password: "sara123",
-    role: "user",
-    department: "Mechanical Technical office engineer"
-  },
-  {
-    id: "user-maya",
-    name: "Maya Nasser",
-    username: "maya.nasser@mabunited.com",
-    password: "maya123",
-    role: "user",
-    department: "Electrical Technical office engineer"
   }
 ];
 
-const seededTasks: ManagedTask[] = [
-  {
-    id: "task-1",
-    title: "Prepare HVAC shop drawing package",
-    department: "Mechanical Technical office engineer",
-    priority: "high",
-    status: "in_progress",
-    assigneeId: "user-ali",
-    candidateName: "Ali",
-    dueDate: "2026-07-01",
-    progress: 62
-  },
-  {
-    id: "task-2",
-    title: "Review electrical load schedule",
-    department: "Electrical Technical office engineer",
-    priority: "medium",
-    status: "assigned",
-    assigneeId: "user-maya",
-    candidateName: "Maya Nasser",
-    dueDate: "2026-07-03",
-    progress: 35
-  },
-  {
-    id: "task-3",
-    title: "Resolve MEP coordination comments",
-    department: "Mechanical Technical office engineer",
-    priority: "urgent",
-    status: "new",
-    candidateName: "Unassigned",
-    dueDate: "2026-06-30",
-    progress: 0
-  }
-];
+const seededTasks: ManagedTask[] = [];
+
+const storageKeys = {
+  currentUsername: "mab-task-allocator.currentUsername",
+  tasks: "mab-task-allocator.tasks",
+  users: "mab-task-allocator.users"
+};
 
 const priorityLabels: Record<TaskPriority, string> = {
   low: "Low",
@@ -137,6 +92,7 @@ const statusLabels: Record<TaskStatus, string> = {
   assigned: "Assigned",
   in_progress: "In Progress",
   blocked: "Blocked",
+  under_review: "Under Review",
   done: "Done"
 };
 
@@ -145,6 +101,53 @@ const roleLabels: Record<UserRole, string> = {
   admin: "Admin",
   user: "Normal User"
 };
+
+function clampProgress(progress: number) {
+  return Math.min(100, Math.max(0, progress));
+}
+
+function getPriorityRank(priority: TaskPriority) {
+  const ranks: Record<TaskPriority, number> = {
+    urgent: 0,
+    high: 1,
+    medium: 2,
+    low: 3
+  };
+
+  return ranks[priority];
+}
+
+function sortTasksByPriority(tasksToSort: ManagedTask[]) {
+  return [...tasksToSort].sort((firstTask, secondTask) => {
+    const priorityDifference =
+      getPriorityRank(firstTask.priority) - getPriorityRank(secondTask.priority);
+
+    if (priorityDifference !== 0) return priorityDifference;
+    return firstTask.dueDate.localeCompare(secondTask.dueDate);
+  });
+}
+
+function getTimestamp() {
+  return new Date().toLocaleString([], {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "short"
+  });
+}
+
+function readStoredValue<T>(key: string, fallback: T) {
+  try {
+    const storedValue = window.localStorage.getItem(key);
+    return storedValue ? (JSON.parse(storedValue) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredValue<T>(key: string, value: T) {
+  window.localStorage.setItem(key, JSON.stringify(value));
+}
 
 interface LoginPageProps {
   error: string;
@@ -228,11 +231,6 @@ function LoginPage({ error, onLogin }: LoginPageProps) {
             <strong>Superadmin</strong>
             <span>j.chehade@mabunited.com / jadjadjad1</span>
           </div>
-
-          <div className="credential-note">
-            <strong>Department admin</strong>
-            <span>bilal@mabunited.com / bilal123</span>
-          </div>
         </form>
       </section>
     </main>
@@ -248,9 +246,14 @@ export function App() {
   const [allocationMessage, setAllocationMessage] = useState("");
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<AppUser | null>(null);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [taskEditDraft, setTaskEditDraft] = useState<ManagedTask | null>(null);
+  const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
+  const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
   const [taskDraft, setTaskDraft] = useState({
     title: "Prepare client visit checklist",
     assigneeId: "user-ali",
+    department: "Mechanical Technical office engineer" as DepartmentName,
     priority: "high" as TaskPriority,
     dueDate: "2026-07-05",
     progress: 0
@@ -279,9 +282,33 @@ export function App() {
 
   const visibleTasks = useMemo(() => {
     if (!currentUser) return [];
-    if (currentUser.role === "superadmin") return tasks;
-    return tasks.filter((task) => task.department === currentUser.department);
+    const matchingTasks =
+      currentUser.role === "superadmin"
+        ? tasks
+        : tasks.filter((task) => task.department === currentUser.department);
+
+    return sortTasksByPriority(matchingTasks);
   }, [currentUser, tasks]);
+
+  const myTasks = useMemo(() => {
+    if (!currentUser || currentUser.role !== "user") return [];
+    return sortTasksByPriority(tasks.filter((task) => task.assigneeId === currentUser.id));
+  }, [currentUser, tasks]);
+
+  useEffect(() => {
+    if (!currentUser || !canAllocateTasks) return;
+    if (!taskDraft.assigneeId) return;
+    if (assignableUsers.some((user) => user.id === taskDraft.assigneeId)) return;
+
+    setTaskDraft((draft) => ({
+      ...draft,
+      assigneeId: assignableUsers[0]?.id ?? "",
+      department:
+        currentUser.role === "admin"
+          ? currentUser.department
+          : assignableUsers[0]?.department ?? draft.department
+    }));
+  }, [assignableUsers, canAllocateTasks, currentUser, taskDraft.assigneeId]);
 
   const openTasks = visibleTasks.filter((task) => task.status !== "done").length;
   const urgentTasks = visibleTasks.filter((task) => task.priority === "urgent").length;
@@ -388,36 +415,572 @@ export function App() {
     setPeopleMessage(`${user.name} was deleted.`);
   }
 
+  function canManageTask(task: ManagedTask) {
+    if (!currentUser) return false;
+    if (currentUser.role === "superadmin") return true;
+    return currentUser.role === "admin" && task.department === currentUser.department;
+  }
+
   function handleAllocateTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentUser || !canAllocateTasks) return;
 
-    const assignee = users.find((user) => user.id === taskDraft.assigneeId);
+    const title = taskDraft.title.trim();
+    const assignee = taskDraft.assigneeId
+      ? users.find((user) => user.id === taskDraft.assigneeId && user.role === "user")
+      : undefined;
+    const department = assignee?.department ?? (
+      currentUser.role === "admin" ? currentUser.department : taskDraft.department
+    );
 
-    if (!assignee) {
-      setAllocationMessage("Choose a valid normal user.");
+    if (!title) {
+      setAllocationMessage("Please enter a task title.");
       return;
     }
 
-    if (currentUser.role === "admin" && assignee.department !== currentUser.department) {
+    if (taskDraft.assigneeId && !assignee) {
+      setAllocationMessage("Choose a valid normal user or leave the task free.");
+      return;
+    }
+
+    if (currentUser.role === "admin" && department !== currentUser.department) {
       setAllocationMessage("Admins can allocate tasks only inside their own department.");
       return;
     }
 
     const newTask: ManagedTask = {
       id: `task-${Date.now()}`,
-      title: taskDraft.title,
-      department: assignee.department,
+      title,
+      department,
       priority: taskDraft.priority,
-      status: taskDraft.progress > 0 ? "in_progress" : "assigned",
-      assigneeId: assignee.id,
-      candidateName: assignee.name,
+      status: assignee ? (taskDraft.progress > 0 ? "in_progress" : "assigned") : "new",
+      assigneeId: assignee?.id,
+      candidateName: assignee?.name ?? "Unassigned",
       dueDate: taskDraft.dueDate,
-      progress: taskDraft.progress
+      progress: assignee ? clampProgress(taskDraft.progress) : 0,
+      files: [],
+      messages: []
     };
 
     setTasks((existingTasks) => [newTask, ...existingTasks]);
-    setAllocationMessage(`${currentUser.name} allocated "${taskDraft.title}" to ${assignee.name}.`);
+    setAllocationMessage(
+      assignee
+        ? `${currentUser.name} allocated "${title}" to ${assignee.name}.`
+        : `${currentUser.name} added "${title}" as a free ${department} task.`
+    );
+  }
+
+  function startEditTask(task: ManagedTask) {
+    if (!canManageTask(task)) return;
+    setEditingTaskId(task.id);
+    setTaskEditDraft({ ...task });
+  }
+
+  function saveEditTask() {
+    if (!currentUser || !taskEditDraft || !canManageTask(taskEditDraft)) return;
+
+    const title = taskEditDraft.title.trim();
+    if (!title) {
+      setAllocationMessage("Please enter a task title before saving.");
+      return;
+    }
+
+    const assignee = taskEditDraft.assigneeId
+      ? users.find((user) => user.id === taskEditDraft.assigneeId && user.role === "user")
+      : undefined;
+
+    if (taskEditDraft.assigneeId && !assignee) {
+      setAllocationMessage("Choose a valid normal user.");
+      return;
+    }
+
+    if (currentUser.role === "admin" && taskEditDraft.department !== currentUser.department) {
+      setAllocationMessage("Admins can edit tasks only inside their own department.");
+      return;
+    }
+
+    if (currentUser.role === "admin" && assignee?.department !== currentUser.department) {
+      setAllocationMessage("Admins can assign tasks only to normal users in their own department.");
+      return;
+    }
+
+    const department = assignee?.department ?? taskEditDraft.department;
+    const candidateName = assignee?.name ?? "Unassigned";
+    const progress = clampProgress(taskEditDraft.progress);
+
+    const updatedTask: ManagedTask = {
+      ...taskEditDraft,
+      title,
+      department,
+      assigneeId: assignee?.id,
+      candidateName,
+      progress
+    };
+
+    setTasks((existingTasks) =>
+      existingTasks.map((task) => (task.id === updatedTask.id ? updatedTask : task))
+    );
+    setEditingTaskId(null);
+    setTaskEditDraft(null);
+    setAllocationMessage(`"${title}" was updated.`);
+  }
+
+  function deleteTask(task: ManagedTask) {
+    if (!canManageTask(task)) return;
+
+    setTasks((existingTasks) => existingTasks.filter((existingTask) => existingTask.id !== task.id));
+    setEditingTaskId((activeTaskId) => (activeTaskId === task.id ? null : activeTaskId));
+    setTaskEditDraft((draft) => (draft?.id === task.id ? null : draft));
+    setAllocationMessage(`"${task.title}" was deleted.`);
+  }
+
+  function claimTask(task: ManagedTask) {
+    if (!currentUser || currentUser.role !== "user") return;
+    if (task.department !== currentUser.department || task.assigneeId) return;
+
+    setTasks((existingTasks) =>
+      existingTasks.map((existingTask) =>
+        existingTask.id === task.id
+          ? {
+              ...existingTask,
+              assigneeId: currentUser.id,
+              candidateName: currentUser.name,
+              status: "assigned",
+              messages: [
+                ...existingTask.messages,
+                {
+                  id: `msg-${Date.now()}`,
+                  authorName: currentUser.name,
+                  body: "I took this free task.",
+                  createdAt: getTimestamp()
+                }
+              ]
+            }
+          : existingTask
+      )
+    );
+    setAllocationMessage(`${currentUser.name} took "${task.title}".`);
+  }
+
+  function submitTaskForReview(task: ManagedTask) {
+    if (!currentUser || currentUser.role !== "user" || task.assigneeId !== currentUser.id) return;
+    if (task.status === "done" || task.status === "under_review") return;
+
+    setTasks((existingTasks) =>
+      existingTasks.map((existingTask) =>
+        existingTask.id === task.id
+          ? {
+              ...existingTask,
+              status: "under_review",
+              progress: 100,
+              messages: [
+                ...existingTask.messages,
+                {
+                  id: `msg-${Date.now()}`,
+                  authorName: currentUser.name,
+                  body: "Task finished and submitted for review.",
+                  createdAt: getTimestamp()
+                }
+              ]
+            }
+          : existingTask
+      )
+    );
+    setAllocationMessage(`"${task.title}" is under review.`);
+  }
+
+  function approveTask(task: ManagedTask) {
+    if (!currentUser || !canManageTask(task) || task.status !== "under_review") return;
+
+    setTasks((existingTasks) =>
+      existingTasks.map((existingTask) =>
+        existingTask.id === task.id
+          ? {
+              ...existingTask,
+              status: "done",
+              progress: 100,
+              reviewComment: "Approved.",
+              messages: [
+                ...existingTask.messages,
+                {
+                  id: `msg-${Date.now()}`,
+                  authorName: currentUser.name,
+                  body: "Approved. Task is complete.",
+                  createdAt: getTimestamp()
+                }
+              ]
+            }
+          : existingTask
+      )
+    );
+    setAllocationMessage(`"${task.title}" was approved.`);
+  }
+
+  function reopenTask(task: ManagedTask) {
+    if (!currentUser || !canManageTask(task) || task.status !== "under_review") return;
+
+    const comment = reviewDrafts[task.id]?.trim();
+    if (!comment) {
+      setAllocationMessage("Add a review comment before reopening the task.");
+      return;
+    }
+
+    setTasks((existingTasks) =>
+      existingTasks.map((existingTask) =>
+        existingTask.id === task.id
+          ? {
+              ...existingTask,
+              status: "in_progress",
+              progress: Math.min(existingTask.progress, 90),
+              reviewComment: comment,
+              messages: [
+                ...existingTask.messages,
+                {
+                  id: `msg-${Date.now()}`,
+                  authorName: currentUser.name,
+                  body: `Reopened: ${comment}`,
+                  createdAt: getTimestamp()
+                }
+              ]
+            }
+          : existingTask
+      )
+    );
+    setReviewDrafts((drafts) => ({ ...drafts, [task.id]: "" }));
+    setAllocationMessage(`"${task.title}" was reopened with comments.`);
+  }
+
+  function addTaskMessage(task: ManagedTask) {
+    if (!currentUser) return;
+
+    const body = messageDrafts[task.id]?.trim();
+    if (!body) return;
+
+    setTasks((existingTasks) =>
+      existingTasks.map((existingTask) =>
+        existingTask.id === task.id
+          ? {
+              ...existingTask,
+              messages: [
+                ...existingTask.messages,
+                {
+                  id: `msg-${Date.now()}`,
+                  authorName: currentUser.name,
+                  body,
+                  createdAt: getTimestamp()
+                }
+              ]
+            }
+          : existingTask
+      )
+    );
+    setMessageDrafts((drafts) => ({ ...drafts, [task.id]: "" }));
+  }
+
+  function addTaskFiles(task: ManagedTask, fileList: FileList | null) {
+    if (!currentUser || !fileList?.length) return;
+
+    const uploadedAt = getTimestamp();
+    const newFiles = Array.from(fileList).map((file, index) => ({
+      id: `file-${Date.now()}-${index}`,
+      name: file.name,
+      uploadedBy: currentUser.name,
+      uploadedAt
+    }));
+
+    setTasks((existingTasks) =>
+      existingTasks.map((existingTask) =>
+        existingTask.id === task.id
+          ? {
+              ...existingTask,
+              files: [...existingTask.files, ...newFiles]
+            }
+          : existingTask
+      )
+    );
+    setAllocationMessage(`${newFiles.length} file(s) added to "${task.title}".`);
+  }
+
+  function renderTaskCard(task: ManagedTask, view: "department" | "mine" = "department") {
+    const isEditingTask = editingTaskId === task.id && taskEditDraft;
+    const canEditTask = canManageTask(task);
+    const canClaimTask =
+      currentUser?.role === "user" &&
+      task.department === currentUser.department &&
+      !task.assigneeId &&
+      task.status === "new";
+    const canSubmitForReview =
+      currentUser?.role === "user" &&
+      task.assigneeId === currentUser.id &&
+      task.status !== "done" &&
+      task.status !== "under_review";
+    const canReviewTask = canEditTask && task.status === "under_review";
+    const taskAssignableUsers =
+      currentUser?.role === "admin"
+        ? assignableUsers
+        : users.filter(
+            (user) =>
+              user.role === "user" &&
+              user.department === (taskEditDraft?.department ?? task.department)
+          );
+
+    return (
+      <article className="task-card" key={`${view}-${task.id}`}>
+        <div className="task-row task-row-progress">
+          {isEditingTask ? (
+            <div className="edit-task-grid">
+              <input
+                onChange={(event) =>
+                  setTaskEditDraft({ ...taskEditDraft, title: event.target.value })
+                }
+                value={taskEditDraft.title}
+              />
+              {currentUser?.role === "superadmin" ? (
+                <select
+                  onChange={(event) => {
+                    const department = event.target.value as DepartmentName;
+                    const firstUser = users.find(
+                      (user) => user.role === "user" && user.department === department
+                    );
+
+                    setTaskEditDraft({
+                      ...taskEditDraft,
+                      department,
+                      assigneeId: firstUser?.id,
+                      candidateName: firstUser?.name ?? "Unassigned"
+                    });
+                  }}
+                  value={taskEditDraft.department}
+                >
+                  {departments.map((department) => (
+                    <option key={department} value={department}>{department}</option>
+                  ))}
+                </select>
+              ) : null}
+              <select
+                onChange={(event) => {
+                  const assigneeId = event.target.value || undefined;
+                  const assignee = users.find((user) => user.id === assigneeId);
+
+                  setTaskEditDraft({
+                    ...taskEditDraft,
+                    assigneeId,
+                    candidateName: assignee?.name ?? "Unassigned",
+                    department: assignee?.department ?? taskEditDraft.department
+                  });
+                }}
+                value={taskEditDraft.assigneeId ?? ""}
+              >
+                <option value="">Free task - no assignee</option>
+                {taskAssignableUsers.map((user) => (
+                  <option key={user.id} value={user.id}>{user.name}</option>
+                ))}
+              </select>
+              <select
+                onChange={(event) =>
+                  setTaskEditDraft({
+                    ...taskEditDraft,
+                    priority: event.target.value as TaskPriority
+                  })
+                }
+                value={taskEditDraft.priority}
+              >
+                <option value="low">Low priority</option>
+                <option value="medium">Medium priority</option>
+                <option value="high">High priority</option>
+                <option value="urgent">Urgent priority</option>
+              </select>
+              <select
+                onChange={(event) =>
+                  setTaskEditDraft({
+                    ...taskEditDraft,
+                    status: event.target.value as TaskStatus
+                  })
+                }
+                value={taskEditDraft.status}
+              >
+                <option value="new">New</option>
+                <option value="assigned">Assigned</option>
+                <option value="in_progress">In Progress</option>
+                <option value="blocked">Blocked</option>
+                <option value="under_review">Under Review</option>
+                <option value="done">Done</option>
+              </select>
+              <input
+                onChange={(event) =>
+                  setTaskEditDraft({ ...taskEditDraft, dueDate: event.target.value })
+                }
+                type="date"
+                value={taskEditDraft.dueDate}
+              />
+              <input
+                max="100"
+                min="0"
+                onChange={(event) =>
+                  setTaskEditDraft({
+                    ...taskEditDraft,
+                    progress: clampProgress(Number(event.target.value))
+                  })
+                }
+                type="number"
+                value={taskEditDraft.progress}
+              />
+            </div>
+          ) : (
+            <>
+              <div>
+                <strong>{task.title}</strong>
+                <p>{task.department} - Due {task.dueDate}</p>
+                {task.reviewComment ? <p className="review-note">Review: {task.reviewComment}</p> : null}
+                <div className="task-progress">
+                  <span style={{ width: `${task.progress}%` }} />
+                </div>
+              </div>
+              <div className="task-meta">
+                <span className={`priority priority-${task.priority}`}>
+                  {priorityLabels[task.priority]}
+                </span>
+                <span>{statusLabels[task.status]}</span>
+                <span>Candidate: {task.candidateName ?? "Unassigned"}</span>
+                <span>{task.progress}%</span>
+              </div>
+            </>
+          )}
+
+          {canEditTask || canClaimTask || canSubmitForReview ? (
+            <div className="row-actions task-actions">
+              {isEditingTask ? (
+                <>
+                  <button type="button" className="icon-button" onClick={saveEditTask} aria-label="Save task">
+                    <Save aria-hidden="true" size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={() => {
+                      setEditingTaskId(null);
+                      setTaskEditDraft(null);
+                    }}
+                    aria-label="Cancel task edit"
+                  >
+                    <X aria-hidden="true" size={16} />
+                  </button>
+                </>
+              ) : (
+                <>
+                  {canClaimTask ? (
+                    <button type="button" className="task-action-button" onClick={() => claimTask(task)}>
+                      <Hand aria-hidden="true" size={16} />
+                      Take
+                    </button>
+                  ) : null}
+                  {canSubmitForReview ? (
+                    <button type="button" className="task-action-button" onClick={() => submitTaskForReview(task)}>
+                      <CheckCircle2 aria-hidden="true" size={16} />
+                      Finished
+                    </button>
+                  ) : null}
+                  {canEditTask ? (
+                    <button type="button" className="icon-button" onClick={() => startEditTask(task)} aria-label="Edit task">
+                      <Edit3 aria-hidden="true" size={16} />
+                    </button>
+                  ) : null}
+                  {currentUser?.role === "superadmin" ? (
+                    <button type="button" className="icon-button danger" onClick={() => deleteTask(task)} aria-label="Delete task">
+                      <Trash2 aria-hidden="true" size={16} />
+                    </button>
+                  ) : null}
+                </>
+              )}
+            </div>
+          ) : null}
+        </div>
+
+        {task.status === "under_review" && task.assigneeId === currentUser?.id ? (
+          <p className="review-note">Submitted and waiting for admin review.</p>
+        ) : null}
+
+        {canReviewTask ? (
+          <div className="review-box">
+            <input
+              onChange={(event) =>
+                setReviewDrafts((drafts) => ({ ...drafts, [task.id]: event.target.value }))
+              }
+              placeholder="Add comments if this needs changes"
+              value={reviewDrafts[task.id] ?? ""}
+            />
+            <button type="button" className="task-action-button" onClick={() => approveTask(task)}>
+              <CheckCircle2 aria-hidden="true" size={16} />
+              Approve
+            </button>
+            <button type="button" className="task-action-button secondary" onClick={() => reopenTask(task)}>
+              <RotateCcw aria-hidden="true" size={16} />
+              Reopen
+            </button>
+          </div>
+        ) : null}
+
+        <div className="task-collab">
+          <div className="task-thread">
+            <div className="collab-heading">
+              <MessageSquare aria-hidden="true" size={16} />
+              <strong>Clarifications</strong>
+            </div>
+            {task.messages.length ? (
+              task.messages.slice(-3).map((message) => (
+                <p key={message.id}>
+                  <strong>{message.authorName}</strong> {message.body}
+                  <span>{message.createdAt}</span>
+                </p>
+              ))
+            ) : (
+              <p>No clarifications yet.</p>
+            )}
+            <div className="chat-form">
+              <input
+                onChange={(event) =>
+                  setMessageDrafts((drafts) => ({ ...drafts, [task.id]: event.target.value }))
+                }
+                placeholder="Ask or reply"
+                value={messageDrafts[task.id] ?? ""}
+              />
+              <button type="button" className="icon-button" onClick={() => addTaskMessage(task)} aria-label="Send clarification">
+                <Plus aria-hidden="true" size={16} />
+              </button>
+            </div>
+          </div>
+
+          <div className="task-files">
+            <div className="collab-heading">
+              <Paperclip aria-hidden="true" size={16} />
+              <strong>Files</strong>
+            </div>
+            {task.files.length ? (
+              task.files.slice(-3).map((file) => (
+                <p key={file.id}>
+                  {file.name}
+                  <span>{file.uploadedBy} - {file.uploadedAt}</span>
+                </p>
+              ))
+            ) : (
+              <p>No files added.</p>
+            )}
+            <label className="file-upload">
+              <Paperclip aria-hidden="true" size={16} />
+              Add Files
+              <input
+                multiple
+                onChange={(event) => {
+                  addTaskFiles(task, event.target.files);
+                  event.target.value = "";
+                }}
+                type="file"
+              />
+            </label>
+          </div>
+        </div>
+      </article>
+    );
   }
 
   if (!currentUser) {
@@ -540,13 +1103,38 @@ export function App() {
                     value={taskDraft.title}
                   />
                   <select
-                    onChange={(event) => setTaskDraft((draft) => ({ ...draft, assigneeId: event.target.value }))}
+                    onChange={(event) => {
+                      const assigneeId = event.target.value;
+                      const assignee = users.find((user) => user.id === assigneeId);
+
+                      setTaskDraft((draft) => ({
+                        ...draft,
+                        assigneeId,
+                        department: assignee?.department ?? draft.department
+                      }));
+                    }}
                     value={taskDraft.assigneeId}
                   >
+                    <option value="">Free task - no assignee</option>
                     {assignableUsers.map((user) => (
                       <option key={user.id} value={user.id}>{user.name} - {user.department}</option>
                     ))}
                   </select>
+                  {currentUser.role === "superadmin" && !taskDraft.assigneeId ? (
+                    <select
+                      onChange={(event) =>
+                        setTaskDraft((draft) => ({
+                          ...draft,
+                          department: event.target.value as DepartmentName
+                        }))
+                      }
+                      value={taskDraft.department}
+                    >
+                      {departments.map((department) => (
+                        <option key={department} value={department}>{department}</option>
+                      ))}
+                    </select>
+                  ) : null}
                   <select
                     onChange={(event) =>
                       setTaskDraft((draft) => ({ ...draft, priority: event.target.value as TaskPriority }))
@@ -584,6 +1172,25 @@ export function App() {
         ) : null}
 
         <section className="content-grid">
+          {currentUser.role === "user" ? (
+            <section className="panel" id="my-tasks">
+              <div className="panel-header">
+                <div>
+                  <p>Allocated to {currentUser.name}</p>
+                  <h2>My Tasks</h2>
+                </div>
+              </div>
+
+              <div className="task-list">
+                {myTasks.length ? (
+                  myTasks.map((task) => renderTaskCard(task, "mine"))
+                ) : (
+                  <p className="empty-state">No tasks allocated to you yet.</p>
+                )}
+              </div>
+            </section>
+          ) : null}
+
           <section className="panel" id="tasks">
             <div className="panel-header">
               <div>
@@ -597,25 +1204,7 @@ export function App() {
             </div>
 
             <div className="task-list">
-              {visibleTasks.map((task) => (
-                <article className="task-row task-row-progress" key={task.id}>
-                  <div>
-                    <strong>{task.title}</strong>
-                    <p>{task.department} - Due {task.dueDate}</p>
-                    <div className="task-progress">
-                      <span style={{ width: `${task.progress}%` }} />
-                    </div>
-                  </div>
-                  <div className="task-meta">
-                    <span className={`priority priority-${task.priority}`}>
-                      {priorityLabels[task.priority]}
-                    </span>
-                    <span>{statusLabels[task.status]}</span>
-                    <span>Candidate: {task.candidateName ?? "Unassigned"}</span>
-                    <span>{task.progress}%</span>
-                  </div>
-                </article>
-              ))}
+              {visibleTasks.map((task) => renderTaskCard(task))}
             </div>
           </section>
 

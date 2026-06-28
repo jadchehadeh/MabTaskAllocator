@@ -1,6 +1,6 @@
 export type TaskPriority = "low" | "medium" | "high" | "urgent";
 
-export type TaskStatus = "new" | "assigned" | "in_progress" | "blocked" | "done";
+export type TaskStatus = "new" | "assigned" | "in_progress" | "blocked" | "under_review" | "done";
 
 export type UserRole = "superadmin" | "admin" | "user";
 
