@@ -1,12 +1,13 @@
 # MAB Task Allocator
 
-A frontend-first project scaffold for a company task allocation platform.
+A database-backed task allocation platform with role-based workflows and notifications.
 
 ## Tech Stack
 
 - Frontend: React, TypeScript, Vite
 - Runtime: Node.js
-- Database: PostgreSQL
+- API: Node.js built-in HTTP server
+- Local database: SQLite via Node.js
 - Local environment: Docker Compose
 
 ## Project Structure
@@ -30,16 +31,17 @@ Install dependencies:
 npm install
 ```
 
-Run the frontend:
+Run the API and frontend together:
 
 ```bash
 npm run dev
 ```
 
-Run with Docker and PostgreSQL:
+Run with Docker:
 
 ```bash
 docker compose up --build
 ```
 
-The frontend will be available at `http://localhost:5173`.
+The frontend is available at `http://localhost:5173` and the API at `http://localhost:4000`.
+The local database is created automatically at `apps/api/data/mab.sqlite`.

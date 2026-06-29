@@ -13,7 +13,7 @@ export interface AppUser {
   id: string;
   name: string;
   username: string;
-  password: string;
+  password?: string;
   role: UserRole;
   department: DepartmentName;
 }

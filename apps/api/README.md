@@ -1,10 +1,11 @@
 # API
 
-This folder is reserved for the future Node.js backend.
+The API persists users, sessions, tasks, task messages, file metadata, and notifications in SQLite.
+It uses Node's built-in HTTP and SQLite modules, so no separate database installation is needed locally.
 
-Recommended next stack:
+```bash
+npm run dev:api
+```
 
-- Node.js with TypeScript
-- Express or Fastify
-- PostgreSQL access through Prisma or Drizzle
-- REST API first, with room for realtime updates later
+The database is created automatically at `apps/api/data/mab.sqlite`. Passwords are stored as salted
+scrypt hashes and browser sessions use opaque bearer tokens.

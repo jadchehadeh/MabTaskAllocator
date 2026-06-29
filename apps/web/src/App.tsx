@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  Archive,
+  Bell,
   CheckCircle2,
   ClipboardList,
   Edit3,
@@ -14,7 +16,6 @@ import {
   Plus,
   RotateCcw,
   Save,
-  Search,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -23,62 +24,16 @@ import {
   X
 } from "lucide-react";
 import type { AppUser, DepartmentName, TaskPriority, TaskStatus, UserRole } from "@mab/shared";
+import { api, hasSession } from "./api";
+import type { AppNotification, ManagedTask } from "./api";
 import { StatCard } from "./components/StatCard";
 
 const mabLogo = "/mab-logo.jpeg";
-
-type ManagedTask = {
-  id: string;
-  title: string;
-  department: DepartmentName;
-  priority: TaskPriority;
-  status: TaskStatus;
-  assigneeId?: string;
-  candidateName?: string;
-  dueDate: string;
-  progress: number;
-  reviewComment?: string;
-  files: TaskFile[];
-  messages: TaskMessage[];
-};
-
-type TaskFile = {
-  id: string;
-  name: string;
-  uploadedBy: string;
-  uploadedAt: string;
-};
-
-type TaskMessage = {
-  id: string;
-  authorName: string;
-  body: string;
-  createdAt: string;
-};
 
 const departments: DepartmentName[] = [
   "Mechanical Technical office engineer",
   "Electrical Technical office engineer"
 ];
-
-const seededUsers: AppUser[] = [
-  {
-    id: "user-superadmin",
-    name: "J. Chehade",
-    username: "j.chehade@mabunited.com",
-    password: "jadjadjad1",
-    role: "superadmin",
-    department: "Executive"
-  }
-];
-
-const seededTasks: ManagedTask[] = [];
-
-const storageKeys = {
-  currentUsername: "mab-task-allocator.currentUsername",
-  tasks: "mab-task-allocator.tasks",
-  users: "mab-task-allocator.users"
-};
 
 const priorityLabels: Record<TaskPriority, string> = {
   low: "Low",
@@ -125,28 +80,6 @@ function sortTasksByPriority(tasksToSort: ManagedTask[]) {
     if (priorityDifference !== 0) return priorityDifference;
     return firstTask.dueDate.localeCompare(secondTask.dueDate);
   });
-}
-
-function getTimestamp() {
-  return new Date().toLocaleString([], {
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    month: "short"
-  });
-}
-
-function readStoredValue<T>(key: string, fallback: T) {
-  try {
-    const storedValue = window.localStorage.getItem(key);
-    return storedValue ? (JSON.parse(storedValue) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeStoredValue<T>(key: string, value: T) {
-  window.localStorage.setItem(key, JSON.stringify(value));
 }
 
 interface LoginPageProps {
@@ -238,9 +171,13 @@ function LoginPage({ error, onLogin }: LoginPageProps) {
 }
 
 export function App() {
-  const [users, setUsers] = useState<AppUser[]>(seededUsers);
-  const [tasks, setTasks] = useState<ManagedTask[]>(seededTasks);
+  const [users, setUsers] = useState<AppUser[]>([]);
+  const [tasks, setTasks] = useState<ManagedTask[]>([]);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [activeView, setActiveView] = useState<"dashboard" | "finished">("dashboard");
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [appLoading, setAppLoading] = useState(hasSession());
   const [loginError, setLoginError] = useState("");
   const [peopleMessage, setPeopleMessage] = useState("");
   const [allocationMessage, setAllocationMessage] = useState("");
@@ -261,6 +198,40 @@ export function App() {
 
   const canManagePeople = currentUser?.role === "superadmin" || currentUser?.role === "admin";
   const canAllocateTasks = currentUser?.role === "superadmin" || currentUser?.role === "admin";
+
+  async function refreshData(silent = false) {
+    try {
+      const data = await api.bootstrap();
+      setCurrentUser(data.currentUser);
+      setUsers(data.users);
+      setTasks(data.tasks);
+      setNotifications(data.notifications);
+      setLoginError("");
+    } catch (error) {
+      if (!silent) setLoginError(error instanceof Error ? error.message : "Could not connect to the server.");
+      if (!hasSession()) setCurrentUser(null);
+    } finally {
+      if (!silent) setAppLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (hasSession()) void refreshData();
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const interval = window.setInterval(() => void refreshData(true), 4000);
+    const syncSession = () => {
+      if (hasSession()) void refreshData(true);
+      else setCurrentUser(null);
+    };
+    window.addEventListener("storage", syncSession);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("storage", syncSession);
+    };
+  }, [currentUser?.id]);
 
   const visibleUsers = useMemo(() => {
     if (!currentUser) return [];
@@ -290,9 +261,21 @@ export function App() {
     return sortTasksByPriority(matchingTasks);
   }, [currentUser, tasks]);
 
+  const activeTasks = useMemo(
+    () => visibleTasks.filter((task) => task.status !== "done"),
+    [visibleTasks]
+  );
+
+  const finishedTasks = useMemo(
+    () => visibleTasks.filter((task) => task.status === "done"),
+    [visibleTasks]
+  );
+
   const myTasks = useMemo(() => {
     if (!currentUser || currentUser.role !== "user") return [];
-    return sortTasksByPriority(tasks.filter((task) => task.assigneeId === currentUser.id));
+    return sortTasksByPriority(
+      tasks.filter((task) => task.assigneeId === currentUser.id && task.status !== "done")
+    );
   }, [currentUser, tasks]);
 
   useEffect(() => {
@@ -310,26 +293,38 @@ export function App() {
     }));
   }, [assignableUsers, canAllocateTasks, currentUser, taskDraft.assigneeId]);
 
-  const openTasks = visibleTasks.filter((task) => task.status !== "done").length;
-  const urgentTasks = visibleTasks.filter((task) => task.priority === "urgent").length;
+  const openTasks = activeTasks.length;
+  const urgentTasks = activeTasks.filter((task) => task.priority === "urgent").length;
   const averageProgress = visibleTasks.length
     ? Math.round(visibleTasks.reduce((sum, task) => sum + task.progress, 0) / visibleTasks.length)
     : 0;
+  const unreadNotifications = notifications.filter((notification) => !notification.isRead).length;
 
-  function handleLogin(username: string, password: string) {
-    const foundUser = users.find(
-      (user) =>
-        user.username.toLowerCase() === username.trim().toLowerCase() &&
-        user.password === password
-    );
+  async function handleLogout() {
+    await api.logout();
+    setCurrentUser(null);
+    setUsers([]);
+    setTasks([]);
+    setNotifications([]);
+  }
 
-    if (!foundUser) {
-      setLoginError("Username or password is incorrect.");
-      return;
+  async function openNotifications() {
+    setShowNotifications((visible) => !visible);
+    if (unreadNotifications) {
+      await api.markNotificationsRead();
+      setNotifications((items) => items.map((item) => ({ ...item, isRead: true })));
     }
+  }
 
-    setLoginError("");
-    setCurrentUser(foundUser);
+  async function handleLogin(username: string, password: string) {
+    try {
+      setAppLoading(true);
+      await api.login(username, password);
+      await refreshData();
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : "Login failed.");
+      setAppLoading(false);
+    }
   }
 
   function getFormDepartment(formData: FormData): DepartmentName {
@@ -342,11 +337,12 @@ export function App() {
     return String(formData.get("role") ?? "user") as UserRole;
   }
 
-  function handleCreatePerson(event: FormEvent<HTMLFormElement>) {
+  async function handleCreatePerson(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentUser || !canManagePeople) return;
 
-    const formData = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const formData = new FormData(form);
     const name = String(formData.get("name") ?? "").trim();
     const username = String(formData.get("username") ?? "").trim();
     const password = String(formData.get("password") ?? "");
@@ -358,61 +354,49 @@ export function App() {
       return;
     }
 
-    if (users.some((user) => user.username.toLowerCase() === username.toLowerCase())) {
-      setPeopleMessage("This username already exists.");
-      return;
+    try {
+      await api.createUser({ name, username, password, role, department });
+      await refreshData(true);
+      form.reset();
+      setPeopleMessage(`${name} was created as ${roleLabels[role]} in ${department}.`);
+    } catch (error) {
+      setPeopleMessage(error instanceof Error ? error.message : "Could not create this user.");
     }
-
-    setUsers((existingUsers) => [
-      ...existingUsers,
-      {
-        id: `user-${Date.now()}`,
-        name,
-        username,
-        password,
-        role,
-        department
-      }
-    ]);
-    event.currentTarget.reset();
-    setPeopleMessage(`${name} was created as ${roleLabels[role]} in ${department}.`);
   }
 
   function startEditUser(user: AppUser) {
     setEditingUserId(user.id);
-    setEditDraft({ ...user });
+    setEditDraft({ ...user, password: "" });
   }
 
-  function saveEditUser() {
+  async function saveEditUser() {
     if (!currentUser || !editDraft) return;
 
-    if (currentUser.role === "admin") {
-      editDraft.department = currentUser.department;
-      editDraft.role = "user";
+    const updatedUser = currentUser.role === "admin"
+      ? { ...editDraft, department: currentUser.department, role: "user" as UserRole }
+      : editDraft;
+    try {
+      await api.updateUser(updatedUser);
+      await refreshData(true);
+      setEditingUserId(null);
+      setEditDraft(null);
+      setPeopleMessage(`${updatedUser.name} was updated.`);
+    } catch (error) {
+      setPeopleMessage(error instanceof Error ? error.message : "Could not update this user.");
     }
-
-    setUsers((existingUsers) =>
-      existingUsers.map((user) => (user.id === editDraft.id ? editDraft : user))
-    );
-    setCurrentUser((activeUser) => (activeUser?.id === editDraft.id ? editDraft : activeUser));
-    setEditingUserId(null);
-    setEditDraft(null);
-    setPeopleMessage(`${editDraft.name} was updated.`);
   }
 
-  function deleteUser(userId: string) {
+  async function deleteUser(userId: string) {
     const user = users.find((person) => person.id === userId);
     if (!user || user.id === currentUser?.id || user.role === "superadmin") return;
 
-    setUsers((existingUsers) => existingUsers.filter((person) => person.id !== userId));
-    setTasks((existingTasks) =>
-      existingTasks.map((task) =>
-        task.assigneeId === userId
-          ? { ...task, assigneeId: undefined, candidateName: "Unassigned", status: "new", progress: 0 }
-          : task
-      )
-    );
-    setPeopleMessage(`${user.name} was deleted.`);
+    try {
+      await api.deleteUser(userId);
+      await refreshData(true);
+      setPeopleMessage(`${user.name} was deleted.`);
+    } catch (error) {
+      setPeopleMessage(error instanceof Error ? error.message : "Could not delete this user.");
+    }
   }
 
   function canManageTask(task: ManagedTask) {
@@ -421,7 +405,7 @@ export function App() {
     return currentUser.role === "admin" && task.department === currentUser.department;
   }
 
-  function handleAllocateTask(event: FormEvent<HTMLFormElement>) {
+  async function handleAllocateTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentUser || !canAllocateTasks) return;
 
@@ -448,26 +432,27 @@ export function App() {
       return;
     }
 
-    const newTask: ManagedTask = {
-      id: `task-${Date.now()}`,
-      title,
-      department,
-      priority: taskDraft.priority,
-      status: assignee ? (taskDraft.progress > 0 ? "in_progress" : "assigned") : "new",
-      assigneeId: assignee?.id,
-      candidateName: assignee?.name ?? "Unassigned",
-      dueDate: taskDraft.dueDate,
-      progress: assignee ? clampProgress(taskDraft.progress) : 0,
-      files: [],
-      messages: []
-    };
-
-    setTasks((existingTasks) => [newTask, ...existingTasks]);
-    setAllocationMessage(
-      assignee
-        ? `${currentUser.name} allocated "${title}" to ${assignee.name}.`
-        : `${currentUser.name} added "${title}" as a free ${department} task.`
-    );
+    try {
+      await api.createTask({
+        title,
+        department,
+        priority: taskDraft.priority,
+        assigneeId: assignee?.id,
+        candidateName: assignee?.name,
+        dueDate: taskDraft.dueDate,
+        progress: assignee ? clampProgress(taskDraft.progress) : 0,
+        reviewComment: undefined,
+        completedAt: undefined
+      });
+      await refreshData(true);
+      setAllocationMessage(
+        assignee
+          ? `${currentUser.name} allocated "${title}" to ${assignee.name}.`
+          : `${currentUser.name} added "${title}" as a free ${department} task.`
+      );
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not allocate this task.");
+    }
   }
 
   function startEditTask(task: ManagedTask) {
@@ -476,7 +461,7 @@ export function App() {
     setTaskEditDraft({ ...task });
   }
 
-  function saveEditTask() {
+  async function saveEditTask() {
     if (!currentUser || !taskEditDraft || !canManageTask(taskEditDraft)) return;
 
     const title = taskEditDraft.title.trim();
@@ -517,106 +502,70 @@ export function App() {
       progress
     };
 
-    setTasks((existingTasks) =>
-      existingTasks.map((task) => (task.id === updatedTask.id ? updatedTask : task))
-    );
-    setEditingTaskId(null);
-    setTaskEditDraft(null);
-    setAllocationMessage(`"${title}" was updated.`);
+    try {
+      await api.updateTask(updatedTask);
+      await refreshData(true);
+      setEditingTaskId(null);
+      setTaskEditDraft(null);
+      setAllocationMessage(`"${title}" was updated.`);
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not update this task.");
+    }
   }
 
-  function deleteTask(task: ManagedTask) {
+  async function deleteTask(task: ManagedTask) {
     if (!canManageTask(task)) return;
 
-    setTasks((existingTasks) => existingTasks.filter((existingTask) => existingTask.id !== task.id));
-    setEditingTaskId((activeTaskId) => (activeTaskId === task.id ? null : activeTaskId));
-    setTaskEditDraft((draft) => (draft?.id === task.id ? null : draft));
-    setAllocationMessage(`"${task.title}" was deleted.`);
+    try {
+      await api.deleteTask(task.id);
+      await refreshData(true);
+      setEditingTaskId((activeTaskId) => (activeTaskId === task.id ? null : activeTaskId));
+      setTaskEditDraft((draft) => (draft?.id === task.id ? null : draft));
+      setAllocationMessage(`"${task.title}" was deleted.`);
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not delete this task.");
+    }
   }
 
-  function claimTask(task: ManagedTask) {
+  async function claimTask(task: ManagedTask) {
     if (!currentUser || currentUser.role !== "user") return;
     if (task.department !== currentUser.department || task.assigneeId) return;
 
-    setTasks((existingTasks) =>
-      existingTasks.map((existingTask) =>
-        existingTask.id === task.id
-          ? {
-              ...existingTask,
-              assigneeId: currentUser.id,
-              candidateName: currentUser.name,
-              status: "assigned",
-              messages: [
-                ...existingTask.messages,
-                {
-                  id: `msg-${Date.now()}`,
-                  authorName: currentUser.name,
-                  body: "I took this free task.",
-                  createdAt: getTimestamp()
-                }
-              ]
-            }
-          : existingTask
-      )
-    );
-    setAllocationMessage(`${currentUser.name} took "${task.title}".`);
+    try {
+      await api.taskAction(task.id, "claim");
+      await refreshData(true);
+      setAllocationMessage(`${currentUser.name} took "${task.title}".`);
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not claim this task.");
+    }
   }
 
-  function submitTaskForReview(task: ManagedTask) {
+  async function submitTaskForReview(task: ManagedTask) {
     if (!currentUser || currentUser.role !== "user" || task.assigneeId !== currentUser.id) return;
     if (task.status === "done" || task.status === "under_review") return;
 
-    setTasks((existingTasks) =>
-      existingTasks.map((existingTask) =>
-        existingTask.id === task.id
-          ? {
-              ...existingTask,
-              status: "under_review",
-              progress: 100,
-              messages: [
-                ...existingTask.messages,
-                {
-                  id: `msg-${Date.now()}`,
-                  authorName: currentUser.name,
-                  body: "Task finished and submitted for review.",
-                  createdAt: getTimestamp()
-                }
-              ]
-            }
-          : existingTask
-      )
-    );
-    setAllocationMessage(`"${task.title}" is under review.`);
+    try {
+      await api.taskAction(task.id, "submit");
+      await refreshData(true);
+      setAllocationMessage(`"${task.title}" is under review.`);
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not submit this task.");
+    }
   }
 
-  function approveTask(task: ManagedTask) {
+  async function approveTask(task: ManagedTask) {
     if (!currentUser || !canManageTask(task) || task.status !== "under_review") return;
 
-    setTasks((existingTasks) =>
-      existingTasks.map((existingTask) =>
-        existingTask.id === task.id
-          ? {
-              ...existingTask,
-              status: "done",
-              progress: 100,
-              reviewComment: "Approved.",
-              messages: [
-                ...existingTask.messages,
-                {
-                  id: `msg-${Date.now()}`,
-                  authorName: currentUser.name,
-                  body: "Approved. Task is complete.",
-                  createdAt: getTimestamp()
-                }
-              ]
-            }
-          : existingTask
-      )
-    );
-    setAllocationMessage(`"${task.title}" was approved.`);
+    try {
+      await api.taskAction(task.id, "approve");
+      await refreshData(true);
+      setAllocationMessage(`"${task.title}" was approved and moved to Finished Tasks.`);
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not approve this task.");
+    }
   }
 
-  function reopenTask(task: ManagedTask) {
+  async function reopenTask(task: ManagedTask) {
     if (!currentUser || !canManageTask(task) || task.status !== "under_review") return;
 
     const comment = reviewDrafts[task.id]?.trim();
@@ -625,85 +574,48 @@ export function App() {
       return;
     }
 
-    setTasks((existingTasks) =>
-      existingTasks.map((existingTask) =>
-        existingTask.id === task.id
-          ? {
-              ...existingTask,
-              status: "in_progress",
-              progress: Math.min(existingTask.progress, 90),
-              reviewComment: comment,
-              messages: [
-                ...existingTask.messages,
-                {
-                  id: `msg-${Date.now()}`,
-                  authorName: currentUser.name,
-                  body: `Reopened: ${comment}`,
-                  createdAt: getTimestamp()
-                }
-              ]
-            }
-          : existingTask
-      )
-    );
-    setReviewDrafts((drafts) => ({ ...drafts, [task.id]: "" }));
-    setAllocationMessage(`"${task.title}" was reopened with comments.`);
+    try {
+      await api.reopenTask(task.id, comment);
+      await refreshData(true);
+      setReviewDrafts((drafts) => ({ ...drafts, [task.id]: "" }));
+      setAllocationMessage(`"${task.title}" was reopened with comments.`);
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not reopen this task.");
+    }
   }
 
-  function addTaskMessage(task: ManagedTask) {
+  async function addTaskMessage(task: ManagedTask) {
     if (!currentUser) return;
 
     const body = messageDrafts[task.id]?.trim();
     if (!body) return;
 
-    setTasks((existingTasks) =>
-      existingTasks.map((existingTask) =>
-        existingTask.id === task.id
-          ? {
-              ...existingTask,
-              messages: [
-                ...existingTask.messages,
-                {
-                  id: `msg-${Date.now()}`,
-                  authorName: currentUser.name,
-                  body,
-                  createdAt: getTimestamp()
-                }
-              ]
-            }
-          : existingTask
-      )
-    );
-    setMessageDrafts((drafts) => ({ ...drafts, [task.id]: "" }));
+    try {
+      await api.addMessage(task.id, body);
+      await refreshData(true);
+      setMessageDrafts((drafts) => ({ ...drafts, [task.id]: "" }));
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not send this message.");
+    }
   }
 
-  function addTaskFiles(task: ManagedTask, fileList: FileList | null) {
+  async function addTaskFiles(task: ManagedTask, fileList: FileList | null) {
     if (!currentUser || !fileList?.length) return;
 
-    const uploadedAt = getTimestamp();
-    const newFiles = Array.from(fileList).map((file, index) => ({
-      id: `file-${Date.now()}-${index}`,
-      name: file.name,
-      uploadedBy: currentUser.name,
-      uploadedAt
-    }));
-
-    setTasks((existingTasks) =>
-      existingTasks.map((existingTask) =>
-        existingTask.id === task.id
-          ? {
-              ...existingTask,
-              files: [...existingTask.files, ...newFiles]
-            }
-          : existingTask
-      )
-    );
-    setAllocationMessage(`${newFiles.length} file(s) added to "${task.title}".`);
+    const names = Array.from(fileList).map((file) => file.name);
+    try {
+      await api.addFiles(task.id, names);
+      await refreshData(true);
+      setAllocationMessage(`${names.length} file(s) added to "${task.title}".`);
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not add these files.");
+    }
   }
 
   function renderTaskCard(task: ManagedTask, view: "department" | "mine" = "department") {
     const isEditingTask = editingTaskId === task.id && taskEditDraft;
-    const canEditTask = canManageTask(task);
+    const canDeleteTask = canManageTask(task);
+    const canEditTask = canDeleteTask && task.status !== "done";
     const canClaimTask =
       currentUser?.role === "user" &&
       task.department === currentUser.department &&
@@ -847,7 +759,7 @@ export function App() {
             </>
           )}
 
-          {canEditTask || canClaimTask || canSubmitForReview ? (
+          {canEditTask || canDeleteTask || canClaimTask || canSubmitForReview ? (
             <div className="row-actions task-actions">
               {isEditingTask ? (
                 <>
@@ -885,7 +797,7 @@ export function App() {
                       <Edit3 aria-hidden="true" size={16} />
                     </button>
                   ) : null}
-                  {currentUser?.role === "superadmin" ? (
+                  {canDeleteTask ? (
                     <button type="button" className="icon-button danger" onClick={() => deleteTask(task)} aria-label="Delete task">
                       <Trash2 aria-hidden="true" size={16} />
                     </button>
@@ -898,6 +810,16 @@ export function App() {
 
         {task.status === "under_review" && task.assigneeId === currentUser?.id ? (
           <p className="review-note">Submitted and waiting for admin review.</p>
+        ) : null}
+
+        {task.status === "done" ? (
+          <div className="finished-stamp">
+            <CheckCircle2 aria-hidden="true" size={18} />
+            <div>
+              <strong>Approved and completed</strong>
+              <span>{task.completedAt ? `Completed ${task.completedAt}` : "Completion recorded"}</span>
+            </div>
+          </div>
         ) : null}
 
         {canReviewTask ? (
@@ -983,6 +905,15 @@ export function App() {
     );
   }
 
+  if (appLoading) {
+    return (
+      <main className="app-loading">
+        <img src={mabLogo} alt="MAB logo" />
+        <strong>Loading your workspace...</strong>
+      </main>
+    );
+  }
+
   if (!currentUser) {
     return <LoginPage error={loginError} onLogin={handleLogin} />;
   }
@@ -998,10 +929,26 @@ export function App() {
           </div>
         </div>
         <nav>
-          <a href="#dashboard" className="active">Dashboard</a>
-          <a href="#people">People</a>
-          <a href="#tasks">Tasks</a>
-          <a href="#team">Team</a>
+          <button
+            type="button"
+            className={`sidebar-nav-button ${activeView === "dashboard" ? "active" : ""}`}
+            onClick={() => setActiveView("dashboard")}
+          >
+            <ClipboardList aria-hidden="true" size={17} />
+            Active Tasks
+            <span>{activeTasks.length}</span>
+          </button>
+          <button
+            type="button"
+            className={`sidebar-nav-button ${activeView === "finished" ? "active" : ""}`}
+            onClick={() => setActiveView("finished")}
+          >
+            <Archive aria-hidden="true" size={17} />
+            Finished Tasks
+            <span>{finishedTasks.length}</span>
+          </button>
+          <a href="#people" onClick={() => setActiveView("dashboard")}>People</a>
+          <a href="#team" onClick={() => setActiveView("dashboard")}>Team</a>
         </nav>
       </aside>
 
@@ -1014,10 +961,41 @@ export function App() {
               <h1>{roleLabels[currentUser.role]} Dashboard</h1>
             </div>
           </div>
-          <button type="button" className="ghost-button" onClick={() => setCurrentUser(null)}>
-            <LogOut aria-hidden="true" size={18} />
-            Logout
-          </button>
+          <div className="topbar-actions">
+            <div className="notification-center">
+              <button
+                type="button"
+                className="notification-button"
+                onClick={openNotifications}
+                aria-label="Notifications"
+                aria-expanded={showNotifications}
+              >
+                <Bell aria-hidden="true" size={19} />
+                {unreadNotifications ? <span>{unreadNotifications}</span> : null}
+              </button>
+              {showNotifications ? (
+                <div className="notification-popover">
+                  <div className="notification-heading">
+                    <strong>Notifications</strong>
+                    <span>{notifications.length} recent</span>
+                  </div>
+                  <div className="notification-list">
+                    {notifications.length ? notifications.map((notification) => (
+                      <article key={notification.id} className={notification.isRead ? "" : "unread"}>
+                        <strong>{notification.title}</strong>
+                        <p>{notification.body}</p>
+                        <span>{notification.createdAt}</span>
+                      </article>
+                    )) : <p className="empty-state">No notifications yet.</p>}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <button type="button" className="ghost-button" onClick={handleLogout}>
+              <LogOut aria-hidden="true" size={18} />
+              Logout
+            </button>
+          </div>
         </header>
 
         <section className="brand-strip" id="dashboard">
@@ -1047,7 +1025,7 @@ export function App() {
           <StatCard label="Avg Progress" value={`${averageProgress}%`} icon={Gauge} tone="amber" />
         </section>
 
-        {canManagePeople || canAllocateTasks ? (
+        {activeView === "dashboard" && (canManagePeople || canAllocateTasks) ? (
           <section className="admin-grid" id="people">
             {canManagePeople ? (
               <section className="panel command-panel">
@@ -1171,7 +1149,7 @@ export function App() {
           </section>
         ) : null}
 
-        <section className="content-grid">
+        {activeView === "dashboard" ? <section className="content-grid">
           {currentUser.role === "user" ? (
             <section className="panel" id="my-tasks">
               <div className="panel-header">
@@ -1197,14 +1175,12 @@ export function App() {
                 <p>{currentUser.role === "superadmin" ? "All departments" : currentUser.department}</p>
                 <h2>Department Tasks</h2>
               </div>
-              <button type="button" className="ghost-button">
-                <Search aria-hidden="true" size={16} />
-                Filter
-              </button>
             </div>
 
             <div className="task-list">
-              {visibleTasks.map((task) => renderTaskCard(task))}
+              {activeTasks.length ? activeTasks.map((task) => renderTaskCard(task)) : (
+                <p className="empty-state">No active tasks in this department.</p>
+              )}
             </div>
           </section>
 
@@ -1322,7 +1298,22 @@ export function App() {
               })}
             </div>
           </section>
-        </section>
+        </section> : (
+          <section className="panel finished-panel" id="finished-tasks">
+            <div className="panel-header">
+              <div>
+                <p>{currentUser.role === "superadmin" ? "All departments" : currentUser.department}</p>
+                <h2>Finished Tasks</h2>
+              </div>
+              <Archive aria-hidden="true" />
+            </div>
+            <div className="task-list">
+              {finishedTasks.length ? finishedTasks.map((task) => renderTaskCard(task)) : (
+                <p className="empty-state">Approved tasks will appear here.</p>
+              )}
+            </div>
+          </section>
+        )}
       </section>
     </main>
   );
