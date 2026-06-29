@@ -2,12 +2,15 @@ export type TaskPriority = "low" | "medium" | "high" | "urgent";
 
 export type TaskStatus = "new" | "assigned" | "in_progress" | "blocked" | "under_review" | "done";
 
+export type TaskType = "Technical" | "QS" | "Shop Drawings" | "BIM" | "Variation";
+
 export type UserRole = "superadmin" | "admin" | "user";
 
 export type DepartmentName =
   | "Executive"
   | "Mechanical Technical office engineer"
-  | "Electrical Technical office engineer";
+  | "Electrical Technical office engineer"
+  | "Document Controller";
 
 export interface AppUser {
   id: string;

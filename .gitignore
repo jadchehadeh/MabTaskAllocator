@@ -5,6 +5,8 @@ build
 .env.local
 .DS_Store
 npm-debug.log*
+*.stdout.log
+*.stderr.log
 coverage
 postgres-data
 apps/api/data/
