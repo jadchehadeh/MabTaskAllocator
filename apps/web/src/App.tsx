@@ -342,11 +342,11 @@ export function App() {
   const [taskFiles, setTaskFiles] = useState<File[]>([]);
   const [reportUserId, setReportUserId] = useState("");
   const [archiveFilters, setArchiveFilters] = useState({
+    taskId: "",
     from: "",
     to: "",
     assigneeId: "",
-    priority: "" as "" | TaskPriority,
-    status: "done" as "" | TaskStatus
+    priority: "" as "" | TaskPriority
   });
 
   const themeOwnerId = currentUser?.id ?? "login";
@@ -570,15 +570,17 @@ export function App() {
     [visibleTasks]
   );
 
-  const filteredArchiveTasks = useMemo(() => visibleTasks.filter((task) => {
-    if (archiveFilters.status && task.status !== archiveFilters.status) return false;
+  const filteredArchiveTasks = useMemo(() => finishedTasks.filter((task) => {
+    const normalizedQuery = archiveFilters.taskId.toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
+    const normalizedTaskCode = task.taskCode.toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
+    if (normalizedQuery && !normalizedTaskCode.includes(normalizedQuery)) return false;
     if (archiveFilters.priority && task.priority !== archiveFilters.priority) return false;
     if (archiveFilters.assigneeId && !task.assigneeIds.includes(archiveFilters.assigneeId)) return false;
     const referenceDate = (task.completedAtIso ?? task.createdAt).slice(0, 10);
     if (archiveFilters.from && referenceDate < archiveFilters.from) return false;
     if (archiveFilters.to && referenceDate > archiveFilters.to) return false;
     return true;
-  }), [archiveFilters, visibleTasks]);
+  }), [archiveFilters, finishedTasks]);
 
   const teamCandidates = useMemo(() => {
     const normalUsers = visibleUsers.filter((user) => user.role === "user");
@@ -2758,34 +2760,71 @@ export function App() {
           </section>
         ) : (
           <section className="panel finished-panel" id="finished-tasks">
-            <div className="panel-header">
-              <div>
-                <p>Searchable task history</p>
-                <h2>Finished Tasks & Explorer</h2>
+            <header className="archive-header">
+              <div className="archive-title-block">
+                <span className="archive-title-icon"><Archive aria-hidden="true" size={22} /></span>
+                <div><p>Completed work archive</p><h2>Finished Tasks</h2><span>Find completed work, delivery dates, and documents without the noise.</span></div>
               </div>
-              <strong className="result-count">{filteredArchiveTasks.length} of {visibleTasks.length}</strong>
+              <div className="archive-summary" aria-label="Archive summary">
+                <span><strong>{finishedTasks.length}</strong>Total completed</span>
+                <span><strong>{finishedTasks.filter((task) => task.completedAtIso?.startsWith(new Date().toISOString().slice(0, 7))).length}</strong>This month</span>
+                <span><strong>{finishedTasks.length ? Math.round((finishedTasks.filter((task) => task.completedAtIso && task.completedAtIso.slice(0, 10) <= task.dueDate).length / finishedTasks.length) * 100) : 0}%</strong>On time</span>
+              </div>
+            </header>
+
+            <div className="archive-search-area">
+              <label className="archive-search">
+                <Search aria-hidden="true" size={19} />
+                <input
+                  aria-label="Search by task ID"
+                  onChange={(event) => setArchiveFilters((filters) => ({ ...filters, taskId: event.target.value }))}
+                  placeholder="Search by task ID — partial IDs work, e.g. 104"
+                  type="search"
+                  value={archiveFilters.taskId}
+                />
+              </label>
+              <strong className="archive-result-count">{filteredArchiveTasks.length} result{filteredArchiveTasks.length === 1 ? "" : "s"}</strong>
             </div>
-            <div className="analytics-filters archive-filters">
-              <label>Status<select value={archiveFilters.status} onChange={(event) => setArchiveFilters((filters) => ({ ...filters, status: event.target.value as "" | TaskStatus }))}>
-                <option value="">All statuses</option>
-                {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select></label>
-              <label>Priority<select value={archiveFilters.priority} onChange={(event) => setArchiveFilters((filters) => ({ ...filters, priority: event.target.value as "" | TaskPriority }))}>
-                <option value="">All priorities</option>
-                {Object.entries(priorityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select></label>
-              <label>Assigned person<select value={archiveFilters.assigneeId} onChange={(event) => setArchiveFilters((filters) => ({ ...filters, assigneeId: event.target.value }))}>
-                <option value="">All candidates</option>
-                {productivityCandidates.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
-              </select></label>
-              <label>From<input type="date" value={archiveFilters.from} onChange={(event) => setArchiveFilters((filters) => ({ ...filters, from: event.target.value }))} /></label>
-              <label>To<input type="date" value={archiveFilters.to} onChange={(event) => setArchiveFilters((filters) => ({ ...filters, to: event.target.value }))} /></label>
-              <button className="ghost-button" type="button" onClick={() => setArchiveFilters({ from: "", to: "", assigneeId: "", priority: "", status: "done" })}>Reset filters</button>
-            </div>
-            <div className="task-list">
-              {filteredArchiveTasks.length ? filteredArchiveTasks.map((task) => renderTaskCard(task)) : (
-                <p className="empty-state">No tasks match these filters.</p>
-              )}
+
+            <details className="archive-filter-panel">
+              <summary>More filters <span>Priority, person, and completion date</span></summary>
+              <div className="archive-filter-grid">
+                <label>Priority<select value={archiveFilters.priority} onChange={(event) => setArchiveFilters((filters) => ({ ...filters, priority: event.target.value as "" | TaskPriority }))}>
+                  <option value="">All priorities</option>
+                  {Object.entries(priorityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select></label>
+                <label>Assigned person<select value={archiveFilters.assigneeId} onChange={(event) => setArchiveFilters((filters) => ({ ...filters, assigneeId: event.target.value }))}>
+                  <option value="">All people</option>
+                  {productivityCandidates.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
+                </select></label>
+                <label>Completed from<input type="date" value={archiveFilters.from} onChange={(event) => setArchiveFilters((filters) => ({ ...filters, from: event.target.value }))} /></label>
+                <label>Completed to<input type="date" value={archiveFilters.to} onChange={(event) => setArchiveFilters((filters) => ({ ...filters, to: event.target.value }))} /></label>
+                <button className="ghost-button" type="button" onClick={() => setArchiveFilters({ taskId: "", from: "", to: "", assigneeId: "", priority: "" })}>Clear filters</button>
+              </div>
+            </details>
+
+            <div className="archive-task-list">
+              {filteredArchiveTasks.length ? filteredArchiveTasks.map((task) => (
+                <details className="archive-task-card" key={`archive-${task.id}`}>
+                  <summary>
+                    <span className="archive-check"><CheckCircle2 aria-hidden="true" size={17} /></span>
+                    <span className="archive-task-name"><strong>{task.title}</strong><small>Task #{task.taskCode}{task.projectName ? ` · ${task.projectName}` : ""}</small></span>
+                    <span className={`priority priority-${task.priority}`}>{priorityLabels[task.priority]}</span>
+                    <span className="archive-owner">{task.candidateName || "Unassigned"}</span>
+                    <span className="archive-completed"><small>Completed</small><strong>{task.completedAt || "Recorded"}</strong></span>
+                  </summary>
+                  <div className="archive-task-details">
+                    <div><span>Department</span><strong>{task.department}</strong></div>
+                    <div><span>Task type</span><strong>{task.taskType}</strong></div>
+                    <div><span>Due date</span><strong>{task.dueDate}</strong></div>
+                    <div><span>Final progress</span><strong>{task.progress}%</strong></div>
+                    <div><span>Comments</span><strong>{task.messages.length}</strong></div>
+                    <div><span>Documents</span><strong>{task.files.length}</strong></div>
+                  </div>
+                  {task.reviewComment ? <p className="archive-review-note"><strong>Final review</strong>{task.reviewComment}</p> : null}
+                  {task.files.length ? <div className="archive-files">{task.files.map((file) => <button className="file-download" key={file.id} onClick={() => downloadTaskFile(file)} type="button"><span><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span><Download aria-hidden="true" size={15} /></button>)}</div> : null}
+                </details>
+              )) : <div className="archive-empty"><Search aria-hidden="true" size={24} /><strong>No finished tasks found</strong><span>Try a shorter task ID or clear the additional filters.</span></div>}
             </div>
           </section>
         )}
