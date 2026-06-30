@@ -4,170 +4,90 @@ import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
-import { DatabaseSync } from "node:sqlite";
+import { AsyncLocalStorage } from "node:async_hooks";
+import pg from "pg";
 import ExcelJS from "exceljs";
 
+const { Pool } = pg;
 const port = Number(process.env.PORT ?? 4000);
 const appDirectory = dirname(fileURLToPath(import.meta.url));
-const databasePath = process.env.API_DATABASE_PATH
-  ? resolve(process.env.API_DATABASE_PATH)
-  : join(appDirectory, "data", "mab.sqlite");
-const attachmentsPath = join(dirname(databasePath), "attachments");
+const attachmentsPath = resolve(process.env.ATTACHMENTS_PATH ?? join(appDirectory, "data", "attachments"));
 const sessionIdleMinutes = 10;
 const maxFileSize = 10 * 1024 * 1024;
 const maxFilesPerUpload = 5;
 const taskTypes = ["Technical", "QS", "Shop Drawings", "BIM", "Variation"];
-mkdirSync(dirname(databasePath), { recursive: true });
+const connectionString =
+  process.env.DATABASE_URL ??
+  "postgresql://mab_user:mab_password@localhost:5432/mab_task_allocator";
+
 mkdirSync(attachmentsPath, { recursive: true });
 
-const db = new DatabaseSync(databasePath);
-db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    username TEXT NOT NULL COLLATE NOCASE UNIQUE,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('superadmin', 'admin', 'user')),
-    department TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    department TEXT NOT NULL,
-    created_by_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS project_members (
-    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    PRIMARY KEY (project_id, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    department TEXT NOT NULL,
-    priority TEXT NOT NULL CHECK (priority IN ('low', 'medium', 'high', 'urgent')),
-    status TEXT NOT NULL CHECK (status IN ('new', 'assigned', 'in_progress', 'blocked', 'under_review', 'done')),
-    assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
-    task_type TEXT NOT NULL DEFAULT 'Technical',
-    task_code TEXT,
-    due_date TEXT NOT NULL,
-    progress INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
-    review_comment TEXT,
-    completed_at TEXT,
-    created_by_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS task_assignees (
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    PRIMARY KEY (task_id, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS task_worker_approvals (
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    approved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (task_id, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS task_code_sequences (
-    prefix TEXT PRIMARY KEY,
-    next_number INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS task_messages (
-    id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    author_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-    author_name TEXT NOT NULL,
-    body TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS task_files (
-    id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    uploaded_by TEXT NOT NULL,
-    uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS notifications (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,
-    title TEXT NOT NULL,
-    body TEXT NOT NULL,
-    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
-    is_read INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS todos (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
-    title TEXT NOT NULL,
-    is_completed INTEGER NOT NULL DEFAULT 0,
-    completed_at TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS chat_groups (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    department TEXT NOT NULL,
-    created_by_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS chat_messages (
-    id TEXT PRIMARY KEY,
-    channel_id TEXT NOT NULL,
-    department TEXT NOT NULL,
-    author_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-    author_name TEXT NOT NULL,
-    body TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE INDEX IF NOT EXISTS idx_tasks_department ON tasks(department);
-  CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
-  CREATE INDEX IF NOT EXISTS idx_task_assignees_user ON task_assignees(user_id, task_id);
-  CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, project_id);
-  CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_todos_user ON todos(user_id, is_completed, created_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_chat_groups_department ON chat_groups(department, created_at);
-  CREATE INDEX IF NOT EXISTS idx_chat_messages_department ON chat_messages(department, created_at DESC);
-`);
+const pool = new Pool({
+  connectionString,
+  max: Number(process.env.DATABASE_POOL_SIZE ?? 10),
+  ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined
+});
+pool.on("error", (error) => console.error("Unexpected PostgreSQL pool error", error));
 
-function ensureColumn(table, column, definition) {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
-  if (!columns.some((item) => item.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  }
+const schemaSql = readFileSync(new URL("../../infra/postgres/init.sql", import.meta.url), "utf8");
+await pool.query(schemaSql);
+const queryContext = new AsyncLocalStorage();
+
+function executeQuery(text, values = []) {
+  return (queryContext.getStore() ?? pool).query(text, values);
 }
 
-ensureColumn("sessions", "last_active_at", "TEXT");
-ensureColumn("task_files", "storage_name", "TEXT");
-ensureColumn("task_files", "mime_type", "TEXT");
-ensureColumn("task_files", "size", "INTEGER NOT NULL DEFAULT 0");
-ensureColumn("tasks", "project_id", "TEXT");
-ensureColumn("tasks", "task_type", "TEXT NOT NULL DEFAULT 'Technical'");
-ensureColumn("tasks", "task_code", "TEXT");
-ensureColumn("chat_groups", "task_id", "TEXT");
-db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id)");
-db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_groups_task ON chat_groups(task_id) WHERE task_id IS NOT NULL");
-db.exec("UPDATE sessions SET last_active_at = COALESCE(last_active_at, created_at)");
-db.exec(`
-  INSERT OR IGNORE INTO task_assignees (task_id, user_id)
-  SELECT id, assignee_id FROM tasks WHERE assignee_id IS NOT NULL
-`);
+function translateSql(sql) {
+  let text = String(sql);
+  const ignoreConflicts = /INSERT\s+OR\s+IGNORE/i.test(text);
+  text = text
+    .replace(/INSERT\s+OR\s+IGNORE/gi, "INSERT")
+    .replace(/\s+COLLATE\s+NOCASE/gi, "")
+    .replace(/datetime\('now',\s*'-10 minutes'\)/gi, "(timezone('UTC', now() - interval '10 minutes')::text)")
+    .replace(/CURRENT_TIMESTAMP/gi, "(timezone('UTC', now())::text)")
+    .replace(/MIN\(progress,\s*90\)/gi, "LEAST(progress, 90)")
+    .replace(/count\(\*\)\s+AS\s+count/gi, "count(*)::int AS count");
 
+  let parameter = 0;
+  text = text.replace(/\?/g, () => "$" + (++parameter));
+  if (ignoreConflicts) text = text.trim().replace(/;$/, "") + " ON CONFLICT DO NOTHING";
+  return text;
+}
+
+const db = {
+  prepare(sql) {
+    const text = translateSql(sql);
+    return {
+      async all(...values) {
+        return (await executeQuery(text, values)).rows;
+      },
+      async get(...values) {
+        return (await executeQuery(text, values)).rows[0];
+      },
+      async run(...values) {
+        const result = await executeQuery(text, values);
+        return { changes: result.rowCount ?? 0 };
+      }
+    };
+  },
+  exec(sql) {
+    return executeQuery(translateSql(sql));
+  },
+  async transaction(work) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await queryContext.run(client, work);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+};
 function hashPassword(password) {
   const salt = randomBytes(16).toString("hex");
   return `${salt}:${scryptSync(password, salt, 64).toString("hex")}`;
@@ -181,9 +101,9 @@ function passwordMatches(password, storedHash) {
   return stored.length === supplied.length && timingSafeEqual(stored, supplied);
 }
 
-const superadminExists = db.prepare("SELECT id FROM users WHERE role = 'superadmin' LIMIT 1").get();
+const superadminExists = await db.prepare("SELECT id FROM users WHERE role = 'superadmin' LIMIT 1").get();
 if (!superadminExists) {
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO users (id, name, username, password_hash, role, department)
     VALUES (?, ?, ?, ?, 'superadmin', 'Executive')
   `).run("user-superadmin", "J. Chehade", "j.chehade@mabunited.com", hashPassword("jadjadjad1"));
@@ -214,21 +134,21 @@ function isoDateTime(value) {
   return new Date(`${value.replace(" ", "T")}Z`).toISOString();
 }
 
-function getTask(taskId) {
-  return db.prepare(`
+async function getTask(taskId) {
+  return await db.prepare(`
     SELECT tasks.*, projects.name AS project_name
     FROM tasks LEFT JOIN projects ON projects.id = tasks.project_id
     WHERE tasks.id = ?
   `).get(taskId);
 }
 
-function todosFor(userId) {
-  return db.prepare(`
+async function todosFor(userId) {
+  return (await db.prepare(`
     SELECT todos.*, tasks.task_code, tasks.title AS task_title
     FROM todos LEFT JOIN tasks ON tasks.id = todos.task_id
     WHERE todos.user_id = ?
     ORDER BY todos.is_completed ASC, todos.created_at DESC
-  `).all(userId).map((todo) => ({
+  `).all(userId)).map((todo) => ({
     id: todo.id,
     title: todo.title,
     completed: Boolean(todo.is_completed),
@@ -240,32 +160,32 @@ function todosFor(userId) {
   }));
 }
 
-function serializeTask(row) {
-  const messages = db.prepare(`
+async function serializeTask(row) {
+  const messages = (await db.prepare(`
     SELECT id, author_id, author_name, body, created_at FROM task_messages
     WHERE task_id = ? ORDER BY created_at ASC
-  `).all(row.id).map((message) => ({
+  `).all(row.id)).map((message) => ({
     id: message.id,
     authorId: message.author_id ?? "deleted-user",
     authorName: message.author_name,
     body: message.body,
     createdAt: formatDate(message.created_at)
   }));
-  const assignees = db.prepare(`
+  const assignees = await db.prepare(`
     SELECT users.id, users.name FROM task_assignees
     JOIN users ON users.id = task_assignees.user_id
     WHERE task_assignees.task_id = ? ORDER BY users.name
   `).all(row.id);
-  const approvals = db.prepare(`
+  const approvals = await db.prepare(`
     SELECT users.id, users.name, task_worker_approvals.approved_at
     FROM task_worker_approvals JOIN users ON users.id = task_worker_approvals.user_id
     WHERE task_worker_approvals.task_id = ? ORDER BY task_worker_approvals.approved_at
   `).all(row.id);
   const approvedIds = approvals.map((approval) => approval.id);
-  const files = db.prepare(`
+  const files = (await db.prepare(`
     SELECT id, name, uploaded_by, uploaded_at, mime_type, size FROM task_files
     WHERE task_id = ? ORDER BY uploaded_at ASC
-  `).all(row.id).map((file) => ({
+  `).all(row.id)).map((file) => ({
     id: file.id,
     name: file.name,
     uploadedBy: file.uploaded_by,
@@ -302,22 +222,22 @@ function serializeTask(row) {
   };
 }
 
-function projectsFor(actor) {
+async function projectsFor(actor) {
   const rows = actor.role === "superadmin"
-    ? db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all()
+    ? await db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all()
     : actor.role === "admin"
-      ? db.prepare("SELECT * FROM projects WHERE department = ? ORDER BY created_at DESC").all(actor.department)
-      : db.prepare(`
+      ? await db.prepare("SELECT * FROM projects WHERE department = ? ORDER BY created_at DESC").all(actor.department)
+      : await db.prepare(`
           SELECT projects.* FROM projects JOIN project_members ON project_members.project_id = projects.id
           WHERE project_members.user_id = ? ORDER BY projects.created_at DESC
         `).all(actor.id);
-  return rows.map((project) => {
-    const members = db.prepare(`
+  return Promise.all(rows.map(async (project) => {
+    const members = (await db.prepare(`
       SELECT users.id, users.name, users.username, users.role, users.department
       FROM project_members JOIN users ON users.id = project_members.user_id
       WHERE project_members.project_id = ? ORDER BY users.name
-    `).all(project.id).map(publicUser);
-    const taskCount = db.prepare("SELECT count(*) AS count FROM tasks WHERE project_id = ?").get(project.id).count;
+    `).all(project.id)).map(publicUser);
+    const taskCount = (await db.prepare("SELECT count(*) AS count FROM tasks WHERE project_id = ?").get(project.id)).count;
     return {
       id: project.id,
       name: project.name,
@@ -327,7 +247,7 @@ function projectsFor(actor) {
       members,
       taskCount
     };
-  });
+  }));
 }
 
 function normalizeTaskType(value) {
@@ -341,80 +261,77 @@ function codeInitials(value, fallback) {
   return (initials || fallback).slice(0, 5);
 }
 
-function generateTaskCode(projectName, department) {
+async function generateTaskCode(projectName, department) {
   const projectCode = codeInitials(projectName, "GEN");
   const departmentCode = String(department).startsWith("Electrical") ? "E"
     : String(department).startsWith("Mechanical") ? "M"
       : String(department).startsWith("Document") ? "D"
         : codeInitials(department, "D").slice(0, 2);
   const prefix = `${projectCode}${departmentCode}`;
-  const sequence = db.prepare("SELECT next_number FROM task_code_sequences WHERE prefix = ?").get(prefix);
-  let number;
-  if (sequence) {
-    number = sequence.next_number;
-    db.prepare("UPDATE task_code_sequences SET next_number = ? WHERE prefix = ?").run(number + 1, prefix);
-  } else {
-    const existing = db.prepare("SELECT task_code FROM tasks WHERE task_code LIKE ? ORDER BY length(task_code) DESC, task_code DESC LIMIT 1")
-      .get(`${prefix}-%`);
-    number = existing ? Number(existing.task_code.split("-").pop()) + 1 : 1;
-    db.prepare("INSERT INTO task_code_sequences (prefix, next_number) VALUES (?, ?)").run(prefix, number + 1);
-  }
+  const result = await executeQuery(`
+    INSERT INTO task_code_sequences (prefix, next_number)
+    VALUES ($1, 2)
+    ON CONFLICT (prefix) DO UPDATE
+      SET next_number = task_code_sequences.next_number + 1
+    RETURNING next_number - 1 AS number
+  `, [prefix]);
+  const number = result.rows[0].number;
   return `${prefix}-${String(number).padStart(2, "0")}`;
 }
 
-function ensureTaskChatGroup(taskId) {
-  const task = db.prepare("SELECT id, task_code, department FROM tasks WHERE id = ?").get(taskId);
-  if (!task || taskAssigneeIds(taskId).length < 2) return;
-  const existing = db.prepare("SELECT id FROM chat_groups WHERE task_id = ?").get(taskId);
+async function ensureTaskChatGroup(taskId) {
+  const task = await db.prepare("SELECT id, task_code, department FROM tasks WHERE id = ?").get(taskId);
+  if (!task || (await taskAssigneeIds(taskId)).length < 2) return;
+  const existing = await db.prepare("SELECT id FROM chat_groups WHERE task_id = ?").get(taskId);
   if (existing) {
-    db.prepare("UPDATE chat_groups SET name = ? WHERE id = ?").run(`Task #${task.task_code}`, existing.id);
+    await db.prepare("UPDATE chat_groups SET name = ? WHERE id = ?").run(`Task #${task.task_code}`, existing.id);
     return;
   }
-  db.prepare("INSERT INTO chat_groups (id, name, department, created_by_id, task_id) VALUES (?, ?, ?, NULL, ?)")
+  await db.prepare("INSERT INTO chat_groups (id, name, department, created_by_id, task_id) VALUES (?, ?, ?, NULL, ?)")
     .run(randomUUID(), `Task #${task.task_code}`, task.department, taskId);
 }
 
-function deleteTaskChatGroup(taskId) {
-  const group = db.prepare("SELECT id FROM chat_groups WHERE task_id = ?").get(taskId);
+async function deleteTaskChatGroup(taskId) {
+  const group = await db.prepare("SELECT id FROM chat_groups WHERE task_id = ?").get(taskId);
   if (!group) return;
-  db.prepare("DELETE FROM chat_messages WHERE channel_id = ?").run(`group:${group.id}`);
-  db.prepare("DELETE FROM chat_groups WHERE id = ?").run(group.id);
+  await db.prepare("DELETE FROM chat_messages WHERE channel_id = ?").run(`group:${group.id}`);
+  await db.prepare("DELETE FROM chat_groups WHERE id = ?").run(group.id);
 }
 
-function taskAssigneeIds(taskId) {
-  return db.prepare("SELECT user_id FROM task_assignees WHERE task_id = ?").all(taskId).map((item) => item.user_id);
+async function taskAssigneeIds(taskId) {
+  return (await db.prepare("SELECT user_id FROM task_assignees WHERE task_id = ?").all(taskId)).map((item) => item.user_id);
 }
 
-function setTaskAssignees(taskId, assigneeIds) {
-  db.prepare("DELETE FROM task_assignees WHERE task_id = ?").run(taskId);
+async function setTaskAssignees(taskId, assigneeIds) {
+  await db.prepare("DELETE FROM task_assignees WHERE task_id = ?").run(taskId);
   for (const userId of assigneeIds) {
-    db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(taskId, userId);
+    await db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(taskId, userId);
   }
-  db.prepare("UPDATE tasks SET assignee_id = ? WHERE id = ?").run(assigneeIds[0] ?? null, taskId);
+  await db.prepare("UPDATE tasks SET assignee_id = ? WHERE id = ?").run(assigneeIds[0] ?? null, taskId);
   if (assigneeIds.length) {
-    db.prepare(`
+    await db.prepare(`
       DELETE FROM task_worker_approvals WHERE task_id = ?
         AND user_id NOT IN (${assigneeIds.map(() => "?").join(",")})
     `).run(taskId, ...assigneeIds);
   } else {
-    db.prepare("DELETE FROM task_worker_approvals WHERE task_id = ?").run(taskId);
+    await db.prepare("DELETE FROM task_worker_approvals WHERE task_id = ?").run(taskId);
   }
-  ensureTaskChatGroup(taskId);
+  await ensureTaskChatGroup(taskId);
 }
 
-function validTaskAssignees(ids, department, projectId = null) {
+async function validTaskAssignees(ids, department, projectId = null) {
   const uniqueIds = [...new Set(Array.isArray(ids) ? ids.map(String) : [])];
   if (!uniqueIds.length) return [];
-  const users = db.prepare(`
+  const users = await db.prepare(`
     SELECT * FROM users WHERE id IN (${uniqueIds.map(() => "?").join(",")})
       AND role = 'user' AND department = ?
   `).all(...uniqueIds, department);
   if (users.length !== uniqueIds.length) throw new Error("Every assignee must be a normal user in the task department.");
   if (projectId) {
-    const memberCount = db.prepare(`
+    const memberCount = (await db.prepare(`
       SELECT count(*) AS count FROM project_members
       WHERE project_id = ? AND user_id IN (${uniqueIds.map(() => "?").join(",")})
-    `).get(projectId, ...uniqueIds).count;
+    `).get(projectId, ...uniqueIds)).count;
     if (memberCount !== uniqueIds.length) throw new Error("Task assignees must be members of the selected project.");
   }
   return users;
@@ -478,39 +395,43 @@ async function parseTaskSheet(file) {
   return tasks;
 }
 
-function notify(userId, kind, title, body, taskId) {
+async function notify(userId, kind, title, body, taskId) {
   if (!userId) return;
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO notifications (id, user_id, kind, title, body, task_id)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(randomUUID(), userId, kind, title, body, taskId ?? null);
 }
 
-function notifyTaskAudience(task, actorId, title, body) {
-  const audience = db.prepare(`
+async function notifyTaskAudience(task, actorId, title, body) {
+  const audience = await db.prepare(`
     SELECT id FROM users
     WHERE id != ? AND (role = 'superadmin' OR department = ?)
   `).all(actorId, task.department);
-  for (const user of audience) notify(user.id, "message", title, body, task.id);
+  await Promise.all(audience.map((user) => notify(user.id, "message", title, body, task.id)));
 }
 
-function chatDataFor(actor) {
+async function chatDataFor(actor) {
   const departments = actor.role === "superadmin"
-    ? db.prepare(`
+    ? (await db.prepare(`
         SELECT department FROM users WHERE department != 'Executive'
         UNION SELECT department FROM tasks WHERE department != 'Executive'
         ORDER BY department
-      `).all().map((item) => item.department)
+      `).all()).map((item) => item.department)
     : [actor.department];
   const departmentGroups = departments.length
-    ? db.prepare(`
+    ? await db.prepare(`
         SELECT id, name, department, task_id FROM chat_groups
         WHERE department IN (${departments.map(() => "?").join(",")})
         ORDER BY created_at ASC
       `).all(...departments)
     : [];
-  const groups = departmentGroups.filter((group) =>
-    !group.task_id || actor.role === "superadmin" || actor.role === "admin" || taskAssigneeIds(group.task_id).includes(actor.id));
+  const groups = [];
+  for (const group of departmentGroups) {
+    if (!group.task_id || actor.role === "superadmin" || actor.role === "admin" || (await taskAssigneeIds(group.task_id)).includes(actor.id)) {
+      groups.push(group);
+    }
+  }
   const channels = [
     ...departments.map((department) => ({
       id: `department:${department}`,
@@ -528,14 +449,14 @@ function chatDataFor(actor) {
   ];
   const channelIds = channels.map((channel) => channel.id);
   const messages = channelIds.length
-    ? db.prepare(`
+    ? (await db.prepare(`
         SELECT * FROM (
           SELECT id, channel_id, author_id, author_name, body, created_at
           FROM chat_messages
           WHERE channel_id IN (${channelIds.map(() => "?").join(",")})
           ORDER BY created_at DESC LIMIT 300
         ) ORDER BY created_at ASC
-      `).all(...channelIds).map((message) => ({
+      `).all(...channelIds)).map((message) => ({
         id: message.id,
         channelId: message.channel_id,
         authorId: message.author_id ?? "deleted-user",
@@ -551,11 +472,11 @@ function canManage(user, task) {
   return user.role === "superadmin" || (user.role === "admin" && user.department === task.department);
 }
 
-function canView(user, task) {
+async function canView(user, task) {
   if (user.role === "superadmin") return true;
   if (user.department !== task.department) return false;
   if (user.role === "admin" || !task.project_id) return true;
-  return Boolean(db.prepare("SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ?").get(task.project_id, user.id));
+  return Boolean(await db.prepare("SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ?").get(task.project_id, user.id));
 }
 
 function send(response, status, data) {
@@ -596,29 +517,29 @@ async function readBody(request) {
   return raw ? JSON.parse(raw) : {};
 }
 
-function authenticatedUser(request) {
+async function authenticatedUser(request) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
   if (!token) return null;
-  const row = db.prepare(`
+  const row = await db.prepare(`
     SELECT users.*, sessions.last_active_at FROM sessions JOIN users ON users.id = sessions.user_id
     WHERE sessions.token = ?
   `).get(token);
   if (row?.last_active_at) {
     const lastActive = new Date(`${row.last_active_at.replace(" ", "T")}Z`).getTime();
     if (Date.now() - lastActive >= sessionIdleMinutes * 60 * 1000) {
-      db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+      await db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
       return null;
     }
   }
   return row ? publicUser(row) : null;
 }
 
-function touchSession(request) {
+async function touchSession(request) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-  if (token) db.prepare("UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE token = ?").run(token);
+  if (token) await db.prepare("UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE token = ?").run(token);
 }
 
-function saveTaskFiles(taskId, actor, files) {
+async function saveTaskFiles(taskId, actor, files) {
   const incoming = Array.isArray(files) ? files.slice(0, maxFilesPerUpload) : [];
   if (Array.isArray(files) && files.length > maxFilesPerUpload) {
     const error = new Error(`You can upload up to ${maxFilesPerUpload} files at once.`);
@@ -636,19 +557,18 @@ function saveTaskFiles(taskId, actor, files) {
   });
 
   const writtenFiles = [];
-  db.exec("BEGIN");
   try {
-    for (const file of prepared) {
-      writeFileSync(join(attachmentsPath, file.storageName), file.data, { flag: "wx" });
-      writtenFiles.push(file.storageName);
-      db.prepare(`
-        INSERT INTO task_files (id, task_id, name, uploaded_by, storage_name, mime_type, size)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(randomUUID(), taskId, file.name, actor.name, file.storageName, file.mimeType, file.data.length);
-    }
-    db.exec("COMMIT");
+    await db.transaction(async () => {
+      for (const file of prepared) {
+        writeFileSync(join(attachmentsPath, file.storageName), file.data, { flag: "wx" });
+        writtenFiles.push(file.storageName);
+        await db.prepare(`
+          INSERT INTO task_files (id, task_id, name, uploaded_by, storage_name, mime_type, size)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(randomUUID(), taskId, file.name, actor.name, file.storageName, file.mimeType, file.data.length);
+      }
+    });
   } catch (error) {
-    db.exec("ROLLBACK");
     for (const storageName of writtenFiles) {
       try { unlinkSync(join(attachmentsPath, storageName)); } catch { /* Best-effort cleanup. */ }
     }
@@ -656,21 +576,21 @@ function saveTaskFiles(taskId, actor, files) {
   }
 }
 
-for (const task of db.prepare(`
+for (const task of await db.prepare(`
   SELECT tasks.id, tasks.department, projects.name AS project_name
   FROM tasks LEFT JOIN projects ON projects.id = tasks.project_id
   WHERE tasks.task_code IS NULL OR tasks.task_code = ''
   ORDER BY tasks.created_at
 `).all()) {
-  db.prepare("UPDATE tasks SET task_code = ? WHERE id = ?")
-    .run(generateTaskCode(task.project_name, task.department), task.id);
+  await db.prepare("UPDATE tasks SET task_code = ? WHERE id = ?")
+    .run(await generateTaskCode(task.project_name, task.department), task.id);
 }
-db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_code ON tasks(task_code)");
-for (const task of db.prepare("SELECT id FROM tasks").all()) ensureTaskChatGroup(task.id);
+await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_code ON tasks(task_code)");
+for (const task of await db.prepare("SELECT id FROM tasks").all()) await ensureTaskChatGroup(task.id);
 
 async function buildProductivityReport(user, month = "") {
   const monthFilter = /^\d{4}-\d{2}$/.test(month) ? month : "";
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     SELECT DISTINCT tasks.id, tasks.task_code, tasks.title, tasks.department, tasks.priority, tasks.status,
       tasks.due_date, tasks.progress, tasks.created_at, tasks.updated_at, tasks.completed_at,
       tasks.task_type, projects.name AS project_name
@@ -807,7 +727,7 @@ async function buildProductivityReport(user, month = "") {
 }
 
 async function buildProjectTaskTemplate(project) {
-  const members = db.prepare(`
+  const members = await db.prepare(`
     SELECT users.name, users.username FROM project_members
     JOIN users ON users.id = project_members.user_id
     WHERE project_members.project_id = ? ORDER BY users.name
@@ -903,54 +823,55 @@ const server = createServer(async (request, response) => {
     const body = request.method === "GET" ? {} : await readBody(request);
 
     if (request.method === "GET" && path === "/api/health") {
-      return send(response, 200, { ok: true, database: databasePath });
+      const health = await executeQuery("SELECT current_database() AS database, now() AS time");
+      return send(response, 200, { ok: true, database: health.rows[0].database, time: health.rows[0].time });
     }
 
     if (request.method === "POST" && path === "/api/auth/login") {
-      const row = db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE").get(String(body.username ?? "").trim());
+      const row = await db.prepare("SELECT * FROM users WHERE lower(username) = lower(?)").get(String(body.username ?? "").trim());
       if (!row || !passwordMatches(String(body.password ?? ""), row.password_hash)) {
         return send(response, 401, { message: "Username or password is incorrect." });
       }
       const token = randomBytes(32).toString("hex");
-      db.prepare("INSERT INTO sessions (token, user_id, last_active_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(token, row.id);
+      await db.prepare("INSERT INTO sessions (token, user_id, last_active_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(token, row.id);
       return send(response, 200, { token, user: publicUser(row) });
     }
 
-    const actor = authenticatedUser(request);
+    const actor = await authenticatedUser(request);
     if (!actor) return send(response, 401, { message: "Please log in again." });
 
     if (request.method === "POST" && path === "/api/auth/fork") {
       const token = randomBytes(32).toString("hex");
-      db.prepare("INSERT INTO sessions (token, user_id, last_active_at) VALUES (?, ?, CURRENT_TIMESTAMP)")
+      await db.prepare("INSERT INTO sessions (token, user_id, last_active_at) VALUES (?, ?, CURRENT_TIMESTAMP)")
         .run(token, actor.id);
-      db.prepare("DELETE FROM sessions WHERE last_active_at < datetime('now', '-10 minutes')").run();
+      await db.prepare("DELETE FROM sessions WHERE last_active_at < datetime('now', '-10 minutes')").run();
       return send(response, 201, { token });
     }
 
     if (request.method === "POST" && path === "/api/auth/activity") {
-      touchSession(request);
+      await touchSession(request);
       return send(response, 200, { ok: true });
     }
 
     if (request.method === "POST" && path === "/api/auth/logout") {
       const token = request.headers.authorization.replace(/^Bearer\s+/i, "");
-      db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+      await db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
       return send(response, 200, { ok: true });
     }
 
     if (request.method === "GET" && path === "/api/chat") {
-      return send(response, 200, chatDataFor(actor));
+      return send(response, 200, await chatDataFor(actor));
     }
 
     const fileDownloadMatch = path.match(/^\/api\/files\/([^/]+)\/download$/);
     if (request.method === "GET" && fileDownloadMatch) {
-      const file = db.prepare(`
+      const file = await db.prepare(`
         SELECT task_files.*, tasks.department, tasks.assignee_id, tasks.project_id
         FROM task_files JOIN tasks ON tasks.id = task_files.task_id
         WHERE task_files.id = ?
       `).get(fileDownloadMatch[1]);
       if (!file) return send(response, 404, { message: "File not found." });
-      if (!canView(actor, file)) return send(response, 403, { message: "You cannot download this file." });
+      if (!await canView(actor, file)) return send(response, 403, { message: "You cannot download this file." });
       if (!file.storage_name) return send(response, 410, { message: "This older file has no stored content." });
       try {
         const data = readFileSync(join(attachmentsPath, basename(file.storage_name)));
@@ -963,12 +884,12 @@ const server = createServer(async (request, response) => {
     const reportMatch = path.match(/^\/api\/reports\/productivity\/([^/]+)$/);
     if (request.method === "GET" && reportMatch) {
       requireManager(actor);
-      const target = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(reportMatch[1]);
+      const target = await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(reportMatch[1]);
       if (!target) return send(response, 404, { message: "Normal user not found." });
       if (actor.role === "admin" && target.department !== actor.department) {
         return send(response, 403, { message: "Admins can export reports for their own department only." });
       }
-      touchSession(request);
+      await touchSession(request);
       const month = url.searchParams.get("month") ?? "";
       const data = await buildProductivityReport(target, month);
       const reportSlug = target.name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || target.id.slice(0, 8);
@@ -977,16 +898,21 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && path === "/api/bootstrap") {
-      const users = db.prepare("SELECT * FROM users ORDER BY name").all().map(publicUser);
-      const tasks = db.prepare(`
+      const users = (await db.prepare("SELECT * FROM users ORDER BY name").all()).map(publicUser);
+      const taskRows = await db.prepare(`
         SELECT tasks.*, projects.name AS project_name
         FROM tasks LEFT JOIN projects ON projects.id = tasks.project_id
         ORDER BY tasks.created_at DESC
-      `).all().filter((task) => canView(actor, task)).map(serializeTask);
-      const notifications = db.prepare(`
+      `).all();
+      const visibleTaskRows = [];
+      for (const task of taskRows) {
+        if (await canView(actor, task)) visibleTaskRows.push(task);
+      }
+      const tasks = await Promise.all(visibleTaskRows.map(serializeTask));
+      const notifications = (await db.prepare(`
         SELECT id, kind, title, body, task_id, is_read, created_at
         FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 30
-      `).all(actor.id).map((item) => ({
+      `).all(actor.id)).map((item) => ({
         id: item.id,
         kind: item.kind,
         title: item.title,
@@ -999,10 +925,10 @@ const server = createServer(async (request, response) => {
         currentUser: actor,
         users,
         tasks,
-        projects: projectsFor(actor),
+        projects: await projectsFor(actor),
         notifications,
-        todos: todosFor(actor.id),
-        ...chatDataFor(actor)
+        todos: await todosFor(actor.id),
+        ...(await chatDataFor(actor))
       });
     }
 
@@ -1011,45 +937,45 @@ const server = createServer(async (request, response) => {
       const taskId = String(body.taskId ?? "").trim() || null;
       if (!title) throw new Error("TODO title is required.");
       if (taskId) {
-        const task = getTask(taskId);
+        const task = await getTask(taskId);
         if (!task) return send(response, 404, { message: "Linked task not found." });
-        if (!canView(actor, task)) return send(response, 403, { message: "You cannot link a TODO to this task." });
+        if (!await canView(actor, task)) return send(response, 403, { message: "You cannot link a TODO to this task." });
       }
       const id = randomUUID();
-      db.prepare("INSERT INTO todos (id, user_id, task_id, title) VALUES (?, ?, ?, ?)")
+      await db.prepare("INSERT INTO todos (id, user_id, task_id, title) VALUES (?, ?, ?, ?)")
         .run(id, actor.id, taskId, title);
-      touchSession(request);
-      return send(response, 201, { todo: todosFor(actor.id).find((todo) => todo.id === id) });
+      await touchSession(request);
+      return send(response, 201, { todo: (await todosFor(actor.id)).find((todo) => todo.id === id) });
     }
 
     const todoMatch = path.match(/^\/api\/todos\/([^/]+)$/);
     if (todoMatch && request.method === "PUT") {
-      const existing = db.prepare("SELECT * FROM todos WHERE id = ? AND user_id = ?").get(todoMatch[1], actor.id);
+      const existing = await db.prepare("SELECT * FROM todos WHERE id = ? AND user_id = ?").get(todoMatch[1], actor.id);
       if (!existing) return send(response, 404, { message: "TODO item not found." });
       const title = String(body.title ?? existing.title).trim().slice(0, 240);
       const completed = Boolean(body.completed);
       const taskId = body.taskId === undefined ? existing.task_id : String(body.taskId ?? "").trim() || null;
       if (!title) throw new Error("TODO title is required.");
       if (taskId) {
-        const task = getTask(taskId);
+        const task = await getTask(taskId);
         if (!task) return send(response, 404, { message: "Linked task not found." });
-        if (!canView(actor, task)) return send(response, 403, { message: "You cannot link a TODO to this task." });
+        if (!await canView(actor, task)) return send(response, 403, { message: "You cannot link a TODO to this task." });
       }
-      db.prepare(`
+      await db.prepare(`
         UPDATE todos
         SET title = ?, task_id = ?, is_completed = ?,
             completed_at = CASE WHEN ? = 1 THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND user_id = ?
       `).run(title, taskId, completed ? 1 : 0, completed ? 1 : 0, existing.id, actor.id);
-      touchSession(request);
-      return send(response, 200, { todo: todosFor(actor.id).find((todo) => todo.id === existing.id) });
+      await touchSession(request);
+      return send(response, 200, { todo: (await todosFor(actor.id)).find((todo) => todo.id === existing.id) });
     }
 
     if (todoMatch && request.method === "DELETE") {
-      const result = db.prepare("DELETE FROM todos WHERE id = ? AND user_id = ?").run(todoMatch[1], actor.id);
+      const result = await db.prepare("DELETE FROM todos WHERE id = ? AND user_id = ?").run(todoMatch[1], actor.id);
       if (!result.changes) return send(response, 404, { message: "TODO item not found." });
-      touchSession(request);
+      await touchSession(request);
       return send(response, 200, { ok: true });
     }
 
@@ -1065,7 +991,7 @@ const server = createServer(async (request, response) => {
       };
       validateUserScope(actor, target);
       if (!target.name || !target.username || !target.password) throw new Error("Name, username, and password are required.");
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO users (id, name, username, password_hash, role, department)
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(target.id, target.name, target.username, hashPassword(target.password), target.role, target.department);
@@ -1074,7 +1000,7 @@ const server = createServer(async (request, response) => {
 
     const userMatch = path.match(/^\/api\/users\/([^/]+)$/);
     if (userMatch && request.method === "PUT") {
-      const existing = db.prepare("SELECT * FROM users WHERE id = ?").get(userMatch[1]);
+      const existing = await db.prepare("SELECT * FROM users WHERE id = ?").get(userMatch[1]);
       if (!existing) return send(response, 404, { message: "User not found." });
       const target = {
         ...existing,
@@ -1084,19 +1010,19 @@ const server = createServer(async (request, response) => {
         department: actor.role === "admin" ? actor.department : body.department
       };
       validateUserScope(actor, target);
-      db.prepare("UPDATE users SET name = ?, username = ?, role = ?, department = ? WHERE id = ?")
+      await db.prepare("UPDATE users SET name = ?, username = ?, role = ?, department = ? WHERE id = ?")
         .run(target.name, target.username, target.role, target.department, target.id);
-      if (body.password) db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(body.password), target.id);
+      if (body.password) await db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(body.password), target.id);
       return send(response, 200, { user: publicUser(target) });
     }
 
     if (userMatch && request.method === "DELETE") {
-      const target = db.prepare("SELECT * FROM users WHERE id = ?").get(userMatch[1]);
+      const target = await db.prepare("SELECT * FROM users WHERE id = ?").get(userMatch[1]);
       if (!target) return send(response, 404, { message: "User not found." });
       validateUserScope(actor, target);
       if (target.id === actor.id || target.role === "superadmin") return send(response, 403, { message: "This user cannot be deleted." });
-      db.prepare("DELETE FROM users WHERE id = ?").run(target.id);
-      db.exec(`
+      await db.prepare("DELETE FROM users WHERE id = ?").run(target.id);
+      await db.exec(`
         UPDATE tasks SET assignee_id = (SELECT user_id FROM task_assignees WHERE task_id = tasks.id LIMIT 1)
         WHERE assignee_id IS NULL;
         UPDATE tasks SET status = 'new', progress = 0
@@ -1111,27 +1037,22 @@ const server = createServer(async (request, response) => {
       const name = String(body.name ?? "").trim().slice(0, 140);
       const description = String(body.description ?? "").trim().slice(0, 2000);
       if (!name || !department || department === "Executive") throw new Error("Project name and department are required.");
-      const members = validTaskAssignees(body.memberIds, department);
+      const members = await validTaskAssignees(body.memberIds, department);
       const id = randomUUID();
-      db.exec("BEGIN");
-      try {
-        db.prepare("INSERT INTO projects (id, name, description, department, created_by_id) VALUES (?, ?, ?, ?, ?)")
+      await db.transaction(async () => {
+        await db.prepare("INSERT INTO projects (id, name, description, department, created_by_id) VALUES (?, ?, ?, ?, ?)")
           .run(id, name, description, department, actor.id);
         for (const member of members) {
-          db.prepare("INSERT INTO project_members (project_id, user_id) VALUES (?, ?)").run(id, member.id);
+          await db.prepare("INSERT INTO project_members (project_id, user_id) VALUES (?, ?)").run(id, member.id);
         }
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
-      return send(response, 201, { project: projectsFor(actor).find((project) => project.id === id) });
+      });
+      return send(response, 201, { project: (await projectsFor(actor)).find((project) => project.id === id) });
     }
 
     const projectTemplateMatch = path.match(/^\/api\/projects\/([^/]+)\/task-sheet-template$/);
     if (projectTemplateMatch && request.method === "GET") {
       requireManager(actor);
-      const project = db.prepare("SELECT * FROM projects WHERE id = ?").get(projectTemplateMatch[1]);
+      const project = await db.prepare("SELECT * FROM projects WHERE id = ?").get(projectTemplateMatch[1]);
       if (!project) return send(response, 404, { message: "Project not found." });
       if (actor.role === "admin" && project.department !== actor.department) {
         return send(response, 403, { message: "You cannot export this project task sheet." });
@@ -1144,104 +1065,94 @@ const server = createServer(async (request, response) => {
     const projectImportMatch = path.match(/^\/api\/projects\/([^/]+)\/import$/);
     if (projectImportMatch && request.method === "POST") {
       requireManager(actor);
-      const project = db.prepare("SELECT * FROM projects WHERE id = ?").get(projectImportMatch[1]);
+      const project = await db.prepare("SELECT * FROM projects WHERE id = ?").get(projectImportMatch[1]);
       if (!project) return send(response, 404, { message: "Project not found." });
       if (actor.role === "admin" && project.department !== actor.department) {
         return send(response, 403, { message: "You cannot import tasks into this project." });
       }
       const importedTasks = await parseTaskSheet(body.file);
-      const members = db.prepare(`
+      const members = await db.prepare(`
         SELECT users.* FROM project_members JOIN users ON users.id = project_members.user_id
         WHERE project_members.project_id = ?
       `).all(project.id);
       const createdIds = [];
-      db.exec("BEGIN");
-      try {
+      await db.transaction(async () => {
         for (const imported of importedTasks) {
           const assigneeIds = members
             .filter((member) => imported.assignees.some((value) =>
               value.toLowerCase() === member.username.toLowerCase() || value.toLowerCase() === member.name.toLowerCase()))
             .map((member) => member.id);
           const id = randomUUID();
-          const taskCode = generateTaskCode(project.name, project.department);
+          const taskCode = await generateTaskCode(project.name, project.department);
           const status = assigneeIds.length ? (imported.progress > 0 ? "in_progress" : "assigned") : "new";
-          db.prepare(`
+          await db.prepare(`
             INSERT INTO tasks (id, task_code, title, department, priority, status, assignee_id, project_id, task_type, due_date, progress, created_by_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(id, taskCode, imported.title, project.department, imported.priority, status, assigneeIds[0] ?? null,
             project.id, imported.taskType, imported.dueDate, assigneeIds.length ? imported.progress : 0, actor.id);
           for (const userId of assigneeIds) {
-            db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(id, userId);
+            await db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(id, userId);
           }
           createdIds.push(id);
         }
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
+      });
       for (const id of createdIds) {
-        ensureTaskChatGroup(id);
-        for (const userId of taskAssigneeIds(id)) notify(userId, "assignment", "Imported project task", `A task was imported into ${project.name}.`, id);
+        await ensureTaskChatGroup(id);
+        for (const userId of await taskAssigneeIds(id)) await notify(userId, "assignment", "Imported project task", `A task was imported into ${project.name}.`, id);
       }
-      touchSession(request);
+      await touchSession(request);
       return send(response, 201, { imported: createdIds.length });
     }
 
     const projectMatch = path.match(/^\/api\/projects\/([^/]+)$/);
     if (projectMatch && request.method === "PUT") {
       requireManager(actor);
-      const project = db.prepare("SELECT * FROM projects WHERE id = ?").get(projectMatch[1]);
+      const project = await db.prepare("SELECT * FROM projects WHERE id = ?").get(projectMatch[1]);
       if (!project) return send(response, 404, { message: "Project not found." });
       if (actor.role === "admin" && project.department !== actor.department) return send(response, 403, { message: "You cannot edit this project." });
-      const members = validTaskAssignees(body.memberIds, project.department);
-      db.exec("BEGIN");
-      try {
-        db.prepare("UPDATE projects SET name = ?, description = ? WHERE id = ?")
+      const members = await validTaskAssignees(body.memberIds, project.department);
+      await db.transaction(async () => {
+        await db.prepare("UPDATE projects SET name = ?, description = ? WHERE id = ?")
           .run(String(body.name ?? project.name).trim(), String(body.description ?? project.description).trim(), project.id);
-        db.prepare("DELETE FROM project_members WHERE project_id = ?").run(project.id);
-        for (const member of members) db.prepare("INSERT INTO project_members (project_id, user_id) VALUES (?, ?)").run(project.id, member.id);
-        db.prepare(`
+        await db.prepare("DELETE FROM project_members WHERE project_id = ?").run(project.id);
+        for (const member of members) await db.prepare("INSERT INTO project_members (project_id, user_id) VALUES (?, ?)").run(project.id, member.id);
+        await db.prepare(`
           DELETE FROM task_assignees
           WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
             AND user_id NOT IN (SELECT user_id FROM project_members WHERE project_id = ?)
         `).run(project.id, project.id);
-        db.prepare(`
+        await db.prepare(`
           UPDATE tasks SET assignee_id = (SELECT user_id FROM task_assignees WHERE task_id = tasks.id LIMIT 1)
           WHERE project_id = ?
         `).run(project.id);
-        db.prepare(`
+        await db.prepare(`
           UPDATE tasks SET status = 'new', progress = 0
           WHERE project_id = ? AND status != 'done'
             AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_id = tasks.id)
         `).run(project.id);
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
-      return send(response, 200, { project: projectsFor(actor).find((item) => item.id === project.id) });
+      });
+      return send(response, 200, { project: (await projectsFor(actor)).find((item) => item.id === project.id) });
     }
 
     if (projectMatch && request.method === "DELETE") {
       requireManager(actor);
-      const project = db.prepare("SELECT * FROM projects WHERE id = ?").get(projectMatch[1]);
+      const project = await db.prepare("SELECT * FROM projects WHERE id = ?").get(projectMatch[1]);
       if (!project) return send(response, 404, { message: "Project not found." });
       if (actor.role === "admin" && project.department !== actor.department) return send(response, 403, { message: "You cannot delete this project." });
-      db.prepare("UPDATE tasks SET project_id = NULL WHERE project_id = ?").run(project.id);
-      db.prepare("DELETE FROM projects WHERE id = ?").run(project.id);
+      await db.prepare("UPDATE tasks SET project_id = NULL WHERE project_id = ?").run(project.id);
+      await db.prepare("DELETE FROM projects WHERE id = ?").run(project.id);
       return send(response, 200, { ok: true });
     }
 
     if (request.method === "POST" && path === "/api/tasks") {
       requireManager(actor);
-      const project = body.projectId ? db.prepare("SELECT * FROM projects WHERE id = ?").get(body.projectId) : null;
+      const project = body.projectId ? await db.prepare("SELECT * FROM projects WHERE id = ?").get(body.projectId) : null;
       if (body.projectId && !project) return send(response, 404, { message: "Project not found." });
       const requestedIds = Array.isArray(body.assigneeIds) ? body.assigneeIds : body.assigneeId ? [body.assigneeId] : [];
-      const firstRequested = requestedIds[0] ? db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(requestedIds[0]) : null;
+      const firstRequested = requestedIds[0] ? await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(requestedIds[0]) : null;
       const department = project?.department ?? firstRequested?.department ?? (actor.role === "admin" ? actor.department : body.department);
       if (actor.role === "admin" && department !== actor.department) return send(response, 403, { message: "Admins can create tasks in their department only." });
-      const assignees = validTaskAssignees(requestedIds, department, project?.id ?? null);
+      const assignees = await validTaskAssignees(requestedIds, department, project?.id ?? null);
       const task = {
         id: randomUUID(),
         title: String(body.title ?? "").trim(),
@@ -1254,58 +1165,58 @@ const server = createServer(async (request, response) => {
         projectId: project?.id ?? null,
         taskType: normalizeTaskType(body.taskType)
       };
-      task.taskCode = generateTaskCode(project?.name, department);
+      task.taskCode = await generateTaskCode(project?.name, department);
       if (!task.title) throw new Error("Task title is required.");
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO tasks (id, task_code, title, department, priority, status, assignee_id, project_id, task_type, due_date, progress, created_by_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(task.id, task.taskCode, task.title, task.department, task.priority, task.status, task.assigneeIds[0] ?? null,
         task.projectId, task.taskType, task.dueDate, task.progress, actor.id);
-      setTaskAssignees(task.id, task.assigneeIds);
+      await setTaskAssignees(task.id, task.assigneeIds);
       try {
-        saveTaskFiles(task.id, actor, body.files);
+        await saveTaskFiles(task.id, actor, body.files);
       } catch (error) {
-        db.prepare("DELETE FROM tasks WHERE id = ?").run(task.id);
+        await db.prepare("DELETE FROM tasks WHERE id = ?").run(task.id);
         throw error;
       }
-      for (const userId of task.assigneeIds) notify(userId, "assignment", "New task allocated", `You were assigned: ${task.title}`, task.id);
-      touchSession(request);
-      return send(response, 201, { task: serializeTask(getTask(task.id)) });
+      for (const userId of task.assigneeIds) await notify(userId, "assignment", "New task allocated", `You were assigned: ${task.title}`, task.id);
+      await touchSession(request);
+      return send(response, 201, { task: await serializeTask(await getTask(task.id)) });
     }
 
     const taskMatch = path.match(/^\/api\/tasks\/([^/]+)$/);
     if (taskMatch && request.method === "PUT") {
-      const existing = getTask(taskMatch[1]);
+      const existing = await getTask(taskMatch[1]);
       if (!existing) return send(response, 404, { message: "Task not found." });
       if (!canManage(actor, existing)) return send(response, 403, { message: "You cannot edit this task." });
-      const project = body.projectId ? db.prepare("SELECT * FROM projects WHERE id = ?").get(body.projectId) : null;
+      const project = body.projectId ? await db.prepare("SELECT * FROM projects WHERE id = ?").get(body.projectId) : null;
       if (body.projectId && !project) return send(response, 404, { message: "Project not found." });
       const requestedIds = Array.isArray(body.assigneeIds) ? body.assigneeIds : body.assigneeId ? [body.assigneeId] : [];
       const department = project?.department ?? body.department ?? existing.department;
       if (actor.role === "admin" && department !== actor.department) return send(response, 403, { message: "Admins can edit tasks in their department only." });
-      const assignees = validTaskAssignees(requestedIds, department, project?.id ?? null);
-      const previousIds = taskAssigneeIds(existing.id);
-      db.prepare(`
+      const assignees = await validTaskAssignees(requestedIds, department, project?.id ?? null);
+      const previousIds = await taskAssigneeIds(existing.id);
+      await db.prepare(`
         UPDATE tasks SET title = ?, department = ?, priority = ?, status = ?, assignee_id = ?, project_id = ?, task_type = ?, due_date = ?, progress = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).run(String(body.title).trim(), department, body.priority, body.status, assignees[0]?.id ?? null,
         project?.id ?? null, normalizeTaskType(body.taskType), body.dueDate,
         Math.max(0, Math.min(100, Number(body.progress) || 0)), existing.id);
-      setTaskAssignees(existing.id, assignees.map((assignee) => assignee.id));
-      if (body.status === "done") deleteTaskChatGroup(existing.id);
+      await setTaskAssignees(existing.id, assignees.map((assignee) => assignee.id));
+      if (body.status === "done") await deleteTaskChatGroup(existing.id);
       for (const assignee of assignees.filter((item) => !previousIds.includes(item.id))) {
-        notify(assignee.id, "assignment", "Task allocated", `You were assigned: ${body.title}`, existing.id);
+        await notify(assignee.id, "assignment", "Task allocated", `You were assigned: ${body.title}`, existing.id);
       }
-      return send(response, 200, { task: serializeTask(getTask(existing.id)) });
+      return send(response, 200, { task: await serializeTask(await getTask(existing.id)) });
     }
 
     if (taskMatch && request.method === "DELETE") {
-      const task = getTask(taskMatch[1]);
+      const task = await getTask(taskMatch[1]);
       if (!task) return send(response, 404, { message: "Task not found." });
       if (!canManage(actor, task)) return send(response, 403, { message: "You cannot delete this task." });
-      const files = db.prepare("SELECT storage_name FROM task_files WHERE task_id = ?").all(task.id);
-      deleteTaskChatGroup(task.id);
-      db.prepare("DELETE FROM tasks WHERE id = ?").run(task.id);
+      const files = await db.prepare("SELECT storage_name FROM task_files WHERE task_id = ?").all(task.id);
+      await deleteTaskChatGroup(task.id);
+      await db.prepare("DELETE FROM tasks WHERE id = ?").run(task.id);
       for (const file of files) {
         if (!file.storage_name) continue;
         try { unlinkSync(join(attachmentsPath, basename(file.storage_name))); } catch { /* Already absent. */ }
@@ -1315,63 +1226,63 @@ const server = createServer(async (request, response) => {
 
     const actionMatch = path.match(/^\/api\/tasks\/([^/]+)\/(claim|submit|approve|reopen|messages|files)$/);
     if (actionMatch && request.method === "POST") {
-      const task = getTask(actionMatch[1]);
+      const task = await getTask(actionMatch[1]);
       if (!task) return send(response, 404, { message: "Task not found." });
       const action = actionMatch[2];
-      const assignedUserIds = taskAssigneeIds(task.id);
+      const assignedUserIds = await taskAssigneeIds(task.id);
 
       if (action === "claim") {
-        if (actor.role !== "user" || actor.department !== task.department || assignedUserIds.length || !canView(actor, task)) return send(response, 403, { message: "This task cannot be claimed." });
-        db.prepare("UPDATE tasks SET assignee_id = ?, status = 'assigned', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(actor.id, task.id);
-        db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(task.id, actor.id);
-        notifyTaskAudience(task, actor.id, "Free task claimed", `${actor.name} took: ${task.title}`);
+        if (actor.role !== "user" || actor.department !== task.department || assignedUserIds.length || !await canView(actor, task)) return send(response, 403, { message: "This task cannot be claimed." });
+        await db.prepare("UPDATE tasks SET assignee_id = ?, status = 'assigned', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(actor.id, task.id);
+        await db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(task.id, actor.id);
+        await notifyTaskAudience(task, actor.id, "Free task claimed", `${actor.name} took: ${task.title}`);
       }
       if (action === "submit") {
         if (actor.role !== "user" || !assignedUserIds.includes(actor.id) || ["done", "under_review"].includes(task.status)) return send(response, 403, { message: "This task cannot be submitted." });
-        db.prepare("INSERT OR IGNORE INTO task_worker_approvals (task_id, user_id) VALUES (?, ?)").run(task.id, actor.id);
-        const approvedIds = db.prepare("SELECT user_id FROM task_worker_approvals WHERE task_id = ?").all(task.id).map((item) => item.user_id);
+        await db.prepare("INSERT OR IGNORE INTO task_worker_approvals (task_id, user_id) VALUES (?, ?)").run(task.id, actor.id);
+        const approvedIds = (await db.prepare("SELECT user_id FROM task_worker_approvals WHERE task_id = ?").all(task.id)).map((item) => item.user_id);
         const remainingIds = assignedUserIds.filter((userId) => !approvedIds.includes(userId));
         if (remainingIds.length) {
-          db.prepare("UPDATE tasks SET status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
-          for (const userId of remainingIds) notify(userId, "approval", "Worker approval needed", `${actor.name} approved ${task.task_code}. Your approval is still required.`, task.id);
+          await db.prepare("UPDATE tasks SET status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
+          for (const userId of remainingIds) await notify(userId, "approval", "Worker approval needed", `${actor.name} approved ${task.task_code}. Your approval is still required.`, task.id);
         } else {
-          db.prepare("UPDATE tasks SET status = 'under_review', progress = 100, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
-          notifyTaskAudience(task, actor.id, "Task ready for admin review", `All workers approved ${task.task_code}: ${task.title}`);
+          await db.prepare("UPDATE tasks SET status = 'under_review', progress = 100, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
+          await notifyTaskAudience(task, actor.id, "Task ready for admin review", `All workers approved ${task.task_code}: ${task.title}`);
         }
       }
       if (action === "approve") {
         if (!canManage(actor, task) || task.status !== "under_review") return send(response, 403, { message: "This task cannot be approved." });
-        db.prepare("UPDATE tasks SET status = 'done', progress = 100, review_comment = 'Approved.', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
-        deleteTaskChatGroup(task.id);
-        for (const userId of assignedUserIds) notify(userId, "approval", "Task approved", `${actor.name} approved: ${task.title}`, task.id);
+        await db.prepare("UPDATE tasks SET status = 'done', progress = 100, review_comment = 'Approved.', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
+        await deleteTaskChatGroup(task.id);
+        for (const userId of assignedUserIds) await notify(userId, "approval", "Task approved", `${actor.name} approved: ${task.title}`, task.id);
       }
       if (action === "reopen") {
         const comment = String(body.comment ?? "").trim();
         if (!canManage(actor, task) || task.status !== "under_review" || !comment) return send(response, 403, { message: "A review comment is required." });
-        db.prepare("UPDATE tasks SET status = 'in_progress', progress = MIN(progress, 90), review_comment = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(comment, task.id);
-        db.prepare("DELETE FROM task_worker_approvals WHERE task_id = ?").run(task.id);
-        for (const userId of assignedUserIds) notify(userId, "review", "Task reopened", `${actor.name}: ${comment}`, task.id);
+        await db.prepare("UPDATE tasks SET status = 'in_progress', progress = MIN(progress, 90), review_comment = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(comment, task.id);
+        await db.prepare("DELETE FROM task_worker_approvals WHERE task_id = ?").run(task.id);
+        for (const userId of assignedUserIds) await notify(userId, "review", "Task reopened", `${actor.name}: ${comment}`, task.id);
       }
       if (action === "messages") {
-        if (!canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
+        if (!await canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
         if (task.status === "done") return send(response, 409, { message: "Approved tasks are read-only. Existing comments remain available." });
         const message = String(body.body ?? "").trim();
         if (!message) throw new Error("Message cannot be empty.");
-        db.prepare("INSERT INTO task_messages (id, task_id, author_id, author_name, body) VALUES (?, ?, ?, ?, ?)")
+        await db.prepare("INSERT INTO task_messages (id, task_id, author_id, author_name, body) VALUES (?, ?, ?, ?, ?)")
           .run(randomUUID(), task.id, actor.id, actor.name, message);
-        notifyTaskAudience(task, actor.id, `New chat on ${task.title}`, `${actor.name}: ${message}`);
+        await notifyTaskAudience(task, actor.id, `New chat on ${task.title}`, `${actor.name}: ${message}`);
       }
       if (action === "files") {
-        if (!canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
+        if (!await canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
         if (task.status === "done") return send(response, 409, { message: "Approved tasks are locked. Existing documents remain available for download." });
-        saveTaskFiles(task.id, actor, body.files);
+        await saveTaskFiles(task.id, actor, body.files);
       }
-      touchSession(request);
-      return send(response, 200, { task: serializeTask(getTask(task.id)) });
+      await touchSession(request);
+      return send(response, 200, { task: await serializeTask(await getTask(task.id)) });
     }
 
     if (request.method === "POST" && path === "/api/notifications/read") {
-      db.prepare("UPDATE notifications SET is_read = 1 WHERE user_id = ?").run(actor.id);
+      await db.prepare("UPDATE notifications SET is_read = 1 WHERE user_id = ?").run(actor.id);
       return send(response, 200, { ok: true });
     }
 
@@ -1380,24 +1291,24 @@ const server = createServer(async (request, response) => {
       const name = String(body.name ?? "").trim().slice(0, 80);
       const department = actor.role === "admin" ? actor.department : String(body.department ?? "").trim();
       if (!name) throw new Error("Group name is required.");
-      const departmentExists = db.prepare("SELECT id FROM users WHERE department = ? LIMIT 1").get(department);
+      const departmentExists = await db.prepare("SELECT id FROM users WHERE department = ? LIMIT 1").get(department);
       if (!departmentExists || department === "Executive") throw new Error("Choose a valid department.");
       const id = randomUUID();
-      db.prepare("INSERT INTO chat_groups (id, name, department, created_by_id) VALUES (?, ?, ?, ?)")
+      await db.prepare("INSERT INTO chat_groups (id, name, department, created_by_id) VALUES (?, ?, ?, ?)")
         .run(id, name, department, actor.id);
-      touchSession(request);
+      await touchSession(request);
       return send(response, 201, { channel: { id: `group:${id}`, name, department, isGroup: true } });
     }
 
     const chatGroupMatch = path.match(/^\/api\/chat\/groups\/([^/]+)$/);
     if (chatGroupMatch && request.method === "PUT") {
       if (actor.role !== "superadmin") return send(response, 403, { message: "Only Super Admin can edit group chats." });
-      const group = db.prepare("SELECT * FROM chat_groups WHERE id = ?").get(chatGroupMatch[1]);
+      const group = await db.prepare("SELECT * FROM chat_groups WHERE id = ?").get(chatGroupMatch[1]);
       if (!group) return send(response, 404, { message: "Chat group not found." });
       const name = String(body.name ?? "").trim().slice(0, 80);
       if (!name) throw new Error("Group name is required.");
-      db.prepare("UPDATE chat_groups SET name = ? WHERE id = ?").run(name, group.id);
-      touchSession(request);
+      await db.prepare("UPDATE chat_groups SET name = ? WHERE id = ?").run(name, group.id);
+      await touchSession(request);
       return send(response, 200, {
         channel: { id: `group:${group.id}`, name, department: group.department, isGroup: true, taskId: group.task_id ?? undefined }
       });
@@ -1405,22 +1316,17 @@ const server = createServer(async (request, response) => {
 
     if (chatGroupMatch && request.method === "DELETE") {
       requireManager(actor);
-      const group = db.prepare("SELECT * FROM chat_groups WHERE id = ?").get(chatGroupMatch[1]);
+      const group = await db.prepare("SELECT * FROM chat_groups WHERE id = ?").get(chatGroupMatch[1]);
       if (!group) return send(response, 404, { message: "Chat group not found." });
       if (actor.role === "admin" && group.department !== actor.department) {
         return send(response, 403, { message: "Admins can delete group chats in their own department only." });
       }
       const channelId = `group:${group.id}`;
-      db.exec("BEGIN");
-      try {
-        db.prepare("DELETE FROM chat_messages WHERE channel_id = ?").run(channelId);
-        db.prepare("DELETE FROM chat_groups WHERE id = ?").run(group.id);
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
-      touchSession(request);
+      await db.transaction(async () => {
+        await db.prepare("DELETE FROM chat_messages WHERE channel_id = ?").run(channelId);
+        await db.prepare("DELETE FROM chat_groups WHERE id = ?").run(group.id);
+      });
+      await touchSession(request);
       return send(response, 200, { ok: true });
     }
 
@@ -1432,10 +1338,10 @@ const server = createServer(async (request, response) => {
       if (channelId.startsWith("department:")) {
         department = channelId.slice("department:".length);
       } else if (channelId.startsWith("group:")) {
-        const group = db.prepare("SELECT department, task_id FROM chat_groups WHERE id = ?").get(channelId.slice("group:".length));
+        const group = await db.prepare("SELECT department, task_id FROM chat_groups WHERE id = ?").get(channelId.slice("group:".length));
         if (!group) return send(response, 404, { message: "Chat group not found." });
         department = group.department;
-        if (group.task_id && actor.role === "user" && !taskAssigneeIds(group.task_id).includes(actor.id)) {
+        if (group.task_id && actor.role === "user" && !(await taskAssigneeIds(group.task_id)).includes(actor.id)) {
           return send(response, 403, { message: "This task chat is limited to its assigned workers." });
         }
       }
@@ -1443,22 +1349,32 @@ const server = createServer(async (request, response) => {
       if (actor.role !== "superadmin" && actor.department !== department) {
         return send(response, 403, { message: "You can chat only inside your own department." });
       }
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO chat_messages (id, channel_id, department, author_id, author_name, body)
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(randomUUID(), channelId, department, actor.id, actor.name, message);
-      touchSession(request);
+      await touchSession(request);
       return send(response, 201, { ok: true });
     }
 
     return send(response, 404, { message: "Route not found." });
   } catch (error) {
-    const status = error.status ?? (String(error.message).includes("UNIQUE") ? 409 : 400);
-    return send(response, status, { message: error.message || "Unexpected server error." });
+    console.error(error);
+    const status = error.status ?? (error.code === "23505" ? 409 : 400);
+    const message = error.code === "23505" ? "This value already exists." : error.message;
+    return send(response, status, { message: message || "Unexpected server error." });
   }
 });
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`MAB API listening on http://localhost:${port}`);
-  console.log(`Database: ${databasePath}`);
+  console.log("Database: PostgreSQL");
 });
+
+async function shutdown() {
+  server.close();
+  await pool.end();
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

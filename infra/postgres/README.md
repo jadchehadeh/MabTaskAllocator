@@ -4,14 +4,23 @@ The database is initialized from `infra/postgres/init.sql` when the Docker volum
 
 ## Main Tables
 
-- `departments`
-- `app_users`
+- `users`
+- `sessions`
+- `projects`
+- `project_members`
 - `tasks`
-- `task_activity`
+- `task_assignees`
+- `task_worker_approvals`
+- `task_messages`
+- `task_files`
+- `notifications`
+- `todos`
+- `chat_groups`
+- `chat_messages`
 
 ## Seeded Logins
 
-Passwords are stored with PostgreSQL `pgcrypto` hashes.
+The API creates the initial superadmin on first startup. Passwords are stored as salted scrypt hashes.
 
 ```text
 Superadmin: j.chehade@mabunited.com / jadjadjad1
@@ -19,8 +28,8 @@ Superadmin: j.chehade@mabunited.com / jadjadjad1
 
 ## Recreate Local Database
 
-If the `postgres-data` Docker volume already exists, PostgreSQL will not rerun `init.sql`.
-To rebuild the local database from this schema:
+The API also applies the idempotent schema during startup. To completely rebuild a local development
+database and intentionally remove its data:
 
 ```bash
 docker compose down -v
