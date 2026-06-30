@@ -22,6 +22,7 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Search,
   ShieldCheck,
   Sparkles,
   Sun,
@@ -137,6 +138,70 @@ function identityColor(id?: string | null, currentUserId?: string) {
   return colors[hash % colors.length];
 }
 
+function sameDepartment(first?: string | null, second?: string | null) {
+  return String(first ?? "").trim().toLocaleLowerCase() === String(second ?? "").trim().toLocaleLowerCase();
+}
+
+interface CandidatePickerProps {
+  candidates: AppUser[];
+  emptyMessage: string;
+  onChange: (ids: string[]) => void;
+  selectedIds: string[];
+}
+
+function CandidatePicker({ candidates, emptyMessage, onChange, selectedIds }: CandidatePickerProps) {
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const filteredCandidates = candidates.filter((candidate) => !normalizedQuery ||
+    candidate.name.toLocaleLowerCase().includes(normalizedQuery) ||
+    candidate.username.toLocaleLowerCase().includes(normalizedQuery) ||
+    candidate.department.toLocaleLowerCase().includes(normalizedQuery));
+
+  if (!candidates.length) return <p className="candidate-empty">{emptyMessage}</p>;
+
+  return (
+    <div className="candidate-selector">
+      <label className="candidate-search">
+        <Search aria-hidden="true" size={16} />
+        <input
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search by name, email, or department..."
+          type="search"
+          value={query}
+        />
+      </label>
+      <div className="candidate-picker" role="group" aria-label="Available candidates">
+      {filteredCandidates.map((candidate) => {
+        const selected = selectedIds.includes(candidate.id);
+        return (
+          <label
+            className={`candidate-option ${selected ? "selected" : ""}`}
+            key={candidate.id}
+          >
+            <input
+              checked={selected}
+              onChange={() => onChange(selected
+                ? selectedIds.filter((id) => id !== candidate.id)
+                : [...selectedIds, candidate.id])}
+              type="checkbox"
+            />
+            <span className="candidate-avatar" aria-hidden="true">
+              {candidate.name.split(" ").filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}
+            </span>
+            <span className="candidate-details">
+              <strong>{candidate.name}</strong>
+              <small>{candidate.department}</small>
+            </span>
+            <CheckCircle2 aria-hidden="true" size={18} />
+          </label>
+        );
+      })}
+      {!filteredCandidates.length ? <p className="candidate-empty candidate-no-results">No users match “{query}”.</p> : null}
+      </div>
+    </div>
+  );
+}
+
 interface LoginPageProps {
   darkMode: boolean;
   error: string;
@@ -248,6 +313,8 @@ export function App() {
   const [selectedChannelId, setSelectedChannelId] = useState("");
   const [chatDraft, setChatDraft] = useState("");
   const [chatStatus, setChatStatus] = useState("");
+  const [editingChatMessageId, setEditingChatMessageId] = useState("");
+  const [chatMessageEditDraft, setChatMessageEditDraft] = useState("");
   const [showGroupForm, setShowGroupForm] = useState(false);
   const [groupDraft, setGroupDraft] = useState({ name: "", department: defaultDepartments[0] });
   const [editingChatGroupId, setEditingChatGroupId] = useState("");
@@ -262,11 +329,15 @@ export function App() {
   const [departmentDraft, setDepartmentDraft] = useState("");
   const [departmentMessage, setDepartmentMessage] = useState("");
   const [allocationMessage, setAllocationMessage] = useState("");
+  const [showTaskComposer, setShowTaskComposer] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<AppUser | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [taskEditDraft, setTaskEditDraft] = useState<ManagedTask | null>(null);
   const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
+  const [editingTaskMessageId, setEditingTaskMessageId] = useState("");
+  const [taskMessageEditDraft, setTaskMessageEditDraft] = useState("");
+  const [taskMessageStatus, setTaskMessageStatus] = useState<Record<string, string>>({});
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
   const [taskFiles, setTaskFiles] = useState<File[]>([]);
   const [reportUserId, setReportUserId] = useState("");
@@ -339,6 +410,7 @@ export function App() {
   });
   const [projectMessage, setProjectMessage] = useState("");
   const [projectMemberDrafts, setProjectMemberDrafts] = useState<Record<string, string[]>>({});
+  const [projectEditDrafts, setProjectEditDrafts] = useState<Record<string, { name: string; description: string }>>({});
   const [confirmation, setConfirmation] = useState<{
     message: string;
     onConfirm: () => Promise<void> | void;
@@ -445,7 +517,7 @@ export function App() {
     if (!currentUser) return [];
     if (currentUser.role === "superadmin") return users;
     if (currentUser.role === "admin") {
-      return users.filter((user) => user.department === currentUser.department && user.role !== "superadmin");
+      return users.filter((user) => sameDepartment(user.department, currentUser.department) && user.role !== "superadmin");
     }
     return users.filter((user) => user.id === currentUser.id);
   }, [currentUser, users]);
@@ -454,7 +526,7 @@ export function App() {
     if (!currentUser) return [];
     if (currentUser.role === "superadmin") return users.filter((user) => user.role === "user");
     if (currentUser.role === "admin") {
-      return users.filter((user) => user.role === "user" && user.department === currentUser.department);
+      return users.filter((user) => user.role === "user" && sameDepartment(user.department, currentUser.department));
     }
     return [];
   }, [currentUser, users]);
@@ -532,8 +604,22 @@ export function App() {
   const taskDraftAssignableUsers = assignableUsers.filter((user) =>
     selectedDraftProject
       ? selectedDraftProject.members.some((member) => member.id === user.id)
-      : user.department === taskDraft.department
+      : sameDepartment(user.department, taskDraft.department)
   );
+  const projectDraftCandidates = assignableUsers.filter((user) => sameDepartment(
+    user.department,
+    currentUser?.role === "admin" ? currentUser.department : projectDraft.department
+  ));
+
+  useEffect(() => {
+    if (currentUser?.role !== "superadmin" || !departments.length) return;
+    setProjectDraft((draft) => departments.some((department) => sameDepartment(department, draft.department))
+      ? draft
+      : { ...draft, department: departments[0], memberIds: [] });
+    setTaskDraft((draft) => draft.projectId || departments.some((department) => sameDepartment(department, draft.department))
+      ? draft
+      : { ...draft, department: departments[0], assigneeIds: [] });
+  }, [currentUser?.id, departments.join("|")]);
 
   useEffect(() => {
     if (!currentUser || !canAllocateTasks) return;
@@ -546,6 +632,8 @@ export function App() {
 
   const openTasks = activeTasks.length;
   const urgentTasks = activeTasks.filter((task) => task.priority === "urgent").length;
+  const reviewTasks = activeTasks.filter((task) => task.status === "under_review").length;
+  const overdueTasks = activeTasks.filter((task) => task.dueDate < new Date().toISOString().slice(0, 10)).length;
   const averageProgress = visibleTasks.length
     ? Math.round(visibleTasks.reduce((sum, task) => sum + task.progress, 0) / visibleTasks.length)
     : 0;
@@ -824,6 +912,7 @@ export function App() {
       }, taskFiles);
       await refreshData(true);
       setTaskFiles([]);
+      setShowTaskComposer(false);
       setAllocationMessage(
         assignees.length
           ? `${currentUser.name} allocated "${title}" to ${assignees.map((assignee) => assignee.name).join(", ")}.`
@@ -852,7 +941,7 @@ export function App() {
     const project = projects.find((item) => item.id === taskEditDraft.projectId);
     const allowedUsers = assignableUsers.filter((user) => project
       ? project.members.some((member) => member.id === user.id)
-      : user.department === taskEditDraft.department);
+      : sameDepartment(user.department, taskEditDraft.department));
     const assignees = allowedUsers.filter((user) => taskEditDraft.assigneeIds.includes(user.id));
     if (assignees.length !== taskEditDraft.assigneeIds.length) {
       setAllocationMessage("Every assignee must be a valid project member in this department.");
@@ -864,7 +953,7 @@ export function App() {
       return;
     }
 
-    if (currentUser.role === "admin" && assignees.some((assignee) => assignee.department !== currentUser.department)) {
+    if (currentUser.role === "admin" && assignees.some((assignee) => !sameDepartment(assignee.department, currentUser.department))) {
       setAllocationMessage("Admins can assign tasks only to normal users in their own department.");
       return;
     }
@@ -983,6 +1072,32 @@ export function App() {
     }
   }
 
+  async function saveTaskMessage(task: ManagedTask, messageId: string) {
+    const body = taskMessageEditDraft.trim();
+    if (!body) return;
+    try {
+      const result = await api.updateTaskMessage(task.id, messageId, body);
+      setTasks((currentTasks) => currentTasks.map((item) => item.id === result.task.id ? result.task : item));
+      setEditingTaskMessageId("");
+      setTaskMessageEditDraft("");
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: "Comment updated." }));
+    } catch (error) {
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: error instanceof Error ? error.message : "Could not edit this comment." }));
+    }
+  }
+
+  function deleteTaskMessage(task: ManagedTask, messageId: string) {
+    requestConfirmation("Delete this task comment? This cannot be undone.", async () => {
+      try {
+        const result = await api.deleteTaskMessage(task.id, messageId);
+        setTasks((currentTasks) => currentTasks.map((item) => item.id === result.task.id ? result.task : item));
+        setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: "Comment deleted." }));
+      } catch (error) {
+        setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: error instanceof Error ? error.message : "Could not delete this comment." }));
+      }
+    });
+  }
+
   async function addTaskFiles(task: ManagedTask, fileList: FileList | null) {
     if (!currentUser || !fileList?.length) return;
 
@@ -1031,6 +1146,32 @@ export function App() {
     } catch (error) {
       setChatStatus(error instanceof Error ? error.message : "Could not send this message.");
     }
+  }
+
+  async function saveChatMessage(messageId: string) {
+    const body = chatMessageEditDraft.trim();
+    if (!body) return;
+    try {
+      await api.updateChatMessage(messageId, body);
+      setChatMessages((messages) => messages.map((message) => message.id === messageId ? { ...message, body } : message));
+      setEditingChatMessageId("");
+      setChatMessageEditDraft("");
+      setChatStatus("Message updated.");
+    } catch (error) {
+      setChatStatus(error instanceof Error ? error.message : "Could not edit this message.");
+    }
+  }
+
+  function deleteChatMessage(messageId: string) {
+    requestConfirmation("Delete this chat message? This cannot be undone.", async () => {
+      try {
+        await api.deleteChatMessage(messageId);
+        setChatMessages((messages) => messages.filter((message) => message.id !== messageId));
+        setChatStatus("Message deleted.");
+      } catch (error) {
+        setChatStatus(error instanceof Error ? error.message : "Could not delete this message.");
+      }
+    });
   }
 
   async function createChatGroup(event: FormEvent<HTMLFormElement>) {
@@ -1110,14 +1251,30 @@ export function App() {
     }
   }
 
-  async function saveProjectMembers(project: Project) {
+  async function saveProject(project: Project) {
     const memberIds = projectMemberDrafts[project.id] ?? project.members.map((member) => member.id);
+    const details = projectEditDrafts[project.id] ?? { name: project.name, description: project.description };
+    const name = details.name.trim();
+    if (!name) {
+      setProjectMessage("Project name is required.");
+      return;
+    }
     try {
-      await api.updateProject(project.id, { name: project.name, description: project.description, memberIds });
-      setProjectMessage(`Updated members for ${project.name}.`);
+      await api.updateProject(project.id, { name, description: details.description.trim(), memberIds });
+      setProjectMessage(`Saved project ${name}.`);
+      setProjectEditDrafts((drafts) => {
+        const next = { ...drafts };
+        delete next[project.id];
+        return next;
+      });
+      setProjectMemberDrafts((drafts) => {
+        const next = { ...drafts };
+        delete next[project.id];
+        return next;
+      });
       await refreshData(true);
     } catch (error) {
-      setProjectMessage(error instanceof Error ? error.message : "Could not update project members.");
+      setProjectMessage(error instanceof Error ? error.message : "Could not update this project.");
     }
   }
 
@@ -1172,7 +1329,7 @@ export function App() {
     const taskEditProject = projects.find((project) => project.id === taskEditDraft?.projectId);
     const taskAssignableUsers = assignableUsers.filter((user) => taskEditProject
       ? taskEditProject.members.some((member) => member.id === user.id)
-      : user.department === (taskEditDraft?.department ?? task.department));
+      : sameDepartment(user.department, taskEditDraft?.department ?? task.department));
 
     return (
       <article className="task-card" key={`${view}-${task.id}`}>
@@ -1422,12 +1579,33 @@ export function App() {
             </div>
             <div className="task-message-list" tabIndex={0} aria-label={`Comments for Task ${task.taskCode}`}>
               {task.messages.length ? task.messages.map((message) => (
-                  <p key={message.id}>
-                    <strong style={{ color: identityColor(message.authorId, currentUser?.id) }}>{message.authorName}</strong> {message.body}
-                    <span>{message.createdAt}</span>
-                  </p>
+                  <article className="task-comment" key={message.id}>
+                    <div className="message-heading">
+                      <strong style={{ color: identityColor(message.authorId, currentUser?.id) }}>{message.authorName}</strong>
+                      <span>{message.createdAt}</span>
+                    </div>
+                    {editingTaskMessageId === message.id ? (
+                      <div className="message-edit-form">
+                        <input
+                          autoFocus
+                          maxLength={2000}
+                          onChange={(event) => setTaskMessageEditDraft(event.target.value)}
+                          value={taskMessageEditDraft}
+                        />
+                        <button className="icon-button" onClick={() => saveTaskMessage(task, message.id)} type="button" aria-label="Save comment"><Save aria-hidden="true" size={15} /></button>
+                        <button className="icon-button" onClick={() => { setEditingTaskMessageId(""); setTaskMessageEditDraft(""); }} type="button" aria-label="Cancel editing"><X aria-hidden="true" size={15} /></button>
+                      </div>
+                    ) : <p>{message.body}</p>}
+                    {message.authorId === currentUser?.id && editingTaskMessageId !== message.id ? (
+                      <div className="message-actions">
+                        <button onClick={() => { setEditingTaskMessageId(message.id); setTaskMessageEditDraft(message.body); }} type="button"><Edit3 aria-hidden="true" size={13} />Edit</button>
+                        <button className="danger" onClick={() => deleteTaskMessage(task, message.id)} type="button"><Trash2 aria-hidden="true" size={13} />Delete</button>
+                      </div>
+                    ) : null}
+                  </article>
                 )) : <p>No comments yet.</p>}
             </div>
+            {taskMessageStatus[task.id] ? <p className="conversation-status">{taskMessageStatus[task.id]}</p> : null}
             {task.status !== "done" ? (
               <>
                 <div className="emoji-picker" aria-label="Quick emojis">
@@ -1632,6 +1810,12 @@ export function App() {
             </div>
           </div>
           <div className="topbar-actions">
+            {canAllocateTasks ? (
+              <button className="primary-button topbar-create-button" onClick={() => setShowTaskComposer(true)} type="button">
+                <Plus aria-hidden="true" size={17} />
+                <span>New Task</span>
+              </button>
+            ) : null}
             <button
               aria-label={`Switch to ${darkMode ? "light" : "dark"} mode`}
               aria-pressed={darkMode}
@@ -1700,15 +1884,55 @@ export function App() {
         </section>
 
         <section className="stats-grid" aria-label="Task allocation metrics">
-          <StatCard label="Open Tasks" value={String(openTasks)} icon={ClipboardList} tone="blue" />
-          <StatCard label="Urgent Tasks" value={String(urgentTasks)} icon={AlertTriangle} tone="red" />
-          <StatCard label="Visible People" value={String(visibleUsers.length)} icon={Users} tone="green" />
-          <StatCard label="Avg Progress" value={`${averageProgress}%`} icon={Gauge} tone="amber" />
+          <StatCard label="Active Tasks" value={String(openTasks)} icon={ClipboardList} tone="blue" />
+          <StatCard label="Needs Review" value={String(reviewTasks)} icon={CheckCircle2} tone="green" />
+          <StatCard label="Overdue" value={String(overdueTasks)} icon={AlertTriangle} tone="red" />
+          <StatCard label="Average Progress" value={`${averageProgress}%`} icon={Gauge} tone="amber" />
+        </section>
+
+        <section className="dashboard-main-grid" aria-label="Dashboard overview">
+          <section className="panel dashboard-work-queue">
+            <div className="panel-header">
+              <div><p>Live workload</p><h2>Priority Work Queue</h2></div>
+              <button className="ghost-button" onClick={() => setActiveView("tasks")} type="button">View all</button>
+            </div>
+            <div className="dashboard-task-list">
+              {activeTasks.slice(0, 6).map((task) => (
+                <button className="dashboard-task-row" key={`dashboard-${task.id}`} onClick={() => setActiveView("tasks")} type="button">
+                  <span className={`dashboard-priority priority-${task.priority}`} />
+                  <span><strong>{task.title}</strong><small>{task.taskCode} · {task.projectName || task.department}</small></span>
+                  <span className="dashboard-assignee">{task.candidateName || "Unassigned"}</span>
+                  <span className="dashboard-due">{task.dueDate}</span>
+                  <strong className="dashboard-progress">{task.progress}%</strong>
+                </button>
+              ))}
+              {!activeTasks.length ? <p className="empty-state">Everything is clear. No active tasks.</p> : null}
+            </div>
+          </section>
+
+          <aside className="dashboard-side-column">
+            <section className="panel dashboard-quick-actions">
+              <div className="panel-header"><div><p>Shortcuts</p><h2>Quick Actions</h2></div></div>
+              <div className="quick-action-grid">
+                {canAllocateTasks ? <button onClick={() => setShowTaskComposer(true)} type="button"><Plus aria-hidden="true" size={18} /><span><strong>New task</strong><small>Assign work now</small></span></button> : null}
+                <button onClick={() => setActiveView("projects")} type="button"><FolderKanban aria-hidden="true" size={18} /><span><strong>Projects</strong><small>{projects.length} available</small></span></button>
+                <button onClick={() => setActiveView("people")} type="button"><Users aria-hidden="true" size={18} /><span><strong>People</strong><small>{visibleUsers.length} visible</small></span></button>
+                <button onClick={() => void openDepartmentChat()} type="button"><MessageSquare aria-hidden="true" size={18} /><span><strong>Messages</strong><small>{chatChannels.length} channels</small></span></button>
+              </div>
+            </section>
+            <section className="panel dashboard-health">
+              <div className="panel-header"><div><p>At a glance</p><h2>Operations</h2></div></div>
+              <div className="health-row"><span>Projects</span><strong>{projects.length}</strong></div>
+              <div className="health-row"><span>Team members</span><strong>{productivityCandidates.length}</strong></div>
+              <div className="health-row"><span>Urgent tasks</span><strong>{urgentTasks}</strong></div>
+              <div className="health-row"><span>Completed tasks</span><strong>{finishedTasks.length}</strong></div>
+            </section>
+          </aside>
         </section>
         </> : null}
 
         {activeView === "dashboard" && (canManagePeople || canAllocateTasks) ? (
-          <section className="admin-grid" id="people">
+          <section className="admin-grid dashboard-legacy-admin" id="people">
             {currentUser.role === "superadmin" ? (
               <section className="panel command-panel department-panel">
                 <div className="panel-header">
@@ -1825,19 +2049,14 @@ export function App() {
                   ) : null}
                   <label className="multi-select-field">
                     Assign one or more people
-                    <select
-                      multiple
-                      onChange={(event) => setTaskDraft((draft) => ({
-                        ...draft,
-                        assigneeIds: Array.from(event.target.selectedOptions).map((option) => option.value)
-                      }))}
-                      size={Math.min(6, Math.max(2, taskDraftAssignableUsers.length))}
-                      value={taskDraft.assigneeIds}
-                    >
-                      {taskDraftAssignableUsers.map((user) => (
-                        <option key={user.id} value={user.id}>{user.name} - {user.department}</option>
-                      ))}
-                    </select>
+                    <CandidatePicker
+                      candidates={taskDraftAssignableUsers}
+                      emptyMessage={selectedDraftProject
+                        ? "This project has no available members. Add people to the project first."
+                        : `No normal users are available in ${taskDraft.department}.`}
+                      onChange={(assigneeIds) => setTaskDraft((draft) => ({ ...draft, assigneeIds }))}
+                      selectedIds={taskDraft.assigneeIds}
+                    />
                   </label>
                   <select onChange={(event) => setTaskDraft((draft) => ({ ...draft, taskType: event.target.value as TaskType }))} value={taskDraft.taskType}>
                     {taskTypes.map((type) => <option key={type} value={type}>{type}</option>)}
@@ -1892,7 +2111,7 @@ export function App() {
           </section>
         ) : null}
 
-        {activeView === "dashboard" ? <section className="content-grid">
+        {activeView === "dashboard" ? <section className="content-grid dashboard-legacy-content">
           {currentUser.role === "user" ? (
             <section className="panel" id="my-tasks">
               <div className="panel-header">
@@ -2164,11 +2383,12 @@ export function App() {
                   </select>
                 ) : <input readOnly value={currentUser.department} />}
                 <label className="multi-select-field">Project members
-                  <select multiple size={4} value={projectDraft.memberIds} onChange={(event) => setProjectDraft((draft) => ({ ...draft, memberIds: Array.from(event.target.selectedOptions).map((option) => option.value) }))}>
-                    {assignableUsers.filter((user) => user.department === (currentUser.role === "admin" ? currentUser.department : projectDraft.department)).map((user) => (
-                      <option key={user.id} value={user.id}>{user.name}</option>
-                    ))}
-                  </select>
+                  <CandidatePicker
+                    candidates={projectDraftCandidates}
+                    emptyMessage={`No normal users are available in ${currentUser.role === "admin" ? currentUser.department : projectDraft.department}.`}
+                    onChange={(memberIds) => setProjectDraft((draft) => ({ ...draft, memberIds }))}
+                    selectedIds={projectDraft.memberIds}
+                  />
                 </label>
                 <button className="primary-button" type="submit"><Plus aria-hidden="true" size={17} />Create Project</button>
               </form>
@@ -2176,22 +2396,46 @@ export function App() {
             {projectMessage ? <p className="success-message">{projectMessage}</p> : null}
             <div className="projects-grid">
               {projects.length ? projects.map((project) => {
-                const eligibleMembers = assignableUsers.filter((user) => user.department === project.department);
+                const eligibleMembers = assignableUsers.filter((user) => sameDepartment(user.department, project.department));
                 const memberIds = projectMemberDrafts[project.id] ?? project.members.map((member) => member.id);
+                const projectDetails = projectEditDrafts[project.id] ?? { name: project.name, description: project.description };
                 return (
                   <article className="project-card" key={project.id}>
                     <div className="member-heading"><div><strong>{project.name}</strong><p>{project.department}</p></div><span>{project.taskCount} tasks</span></div>
-                    <p>{project.description || "No description."}</p>
                     <div className="project-members"><strong>Members</strong><span>{project.members.map((member) => member.name).join(", ") || "No members yet"}</span></div>
                     {canManagePeople ? (
                       <>
-                        <label className="multi-select-field">Manage members
-                          <select multiple size={Math.min(6, Math.max(2, eligibleMembers.length))} value={memberIds} onChange={(event) => setProjectMemberDrafts((drafts) => ({ ...drafts, [project.id]: Array.from(event.target.selectedOptions).map((option) => option.value) }))}>
-                            {eligibleMembers.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
-                          </select>
+                        <div className="project-edit-fields">
+                          <label>Project name
+                            <input
+                              onChange={(event) => setProjectEditDrafts((drafts) => ({
+                                ...drafts,
+                                [project.id]: { ...projectDetails, name: event.target.value }
+                              }))}
+                              value={projectDetails.name}
+                            />
+                          </label>
+                          <label>Description
+                            <input
+                              onChange={(event) => setProjectEditDrafts((drafts) => ({
+                                ...drafts,
+                                [project.id]: { ...projectDetails, description: event.target.value }
+                              }))}
+                              placeholder="Add a short project description"
+                              value={projectDetails.description}
+                            />
+                          </label>
+                        </div>
+                        <label className="multi-select-field">Choose project members
+                          <CandidatePicker
+                            candidates={eligibleMembers}
+                            emptyMessage={`No normal users are available in ${project.department}.`}
+                            onChange={(ids) => setProjectMemberDrafts((drafts) => ({ ...drafts, [project.id]: ids }))}
+                            selectedIds={memberIds}
+                          />
                         </label>
                         <div className="project-actions">
-                          <button className="ghost-button" type="button" onClick={() => saveProjectMembers(project)}><Save aria-hidden="true" size={16} />Save Members</button>
+                          <button className="primary-button" type="button" onClick={() => saveProject(project)}><Save aria-hidden="true" size={16} />Save Project</button>
                           <button className="ghost-button" type="button" onClick={() => exportProjectSheet(project)}><Download aria-hidden="true" size={16} />Export Task Sheet</button>
                           <label className="file-upload"><Upload aria-hidden="true" size={16} />Import Task Sheet
                             <input accept=".xlsx,.csv" type="file" onChange={(event) => { void importProjectSheet(project, event.target.files?.[0]); event.target.value = ""; }} />
@@ -2230,6 +2474,33 @@ export function App() {
               </div>
               <strong className="result-count">{visibleUsers.length} people</strong>
             </div>
+            {canManagePeople ? (
+              <details className="people-management">
+                <summary><UserPlus aria-hidden="true" size={17} /><span><strong>People management</strong><small>Create users{currentUser.role === "superadmin" ? " and departments" : " in your department"}</small></span></summary>
+                <div className="people-management-grid">
+                  {currentUser.role === "superadmin" ? (
+                    <form className="person-form management-form" onSubmit={handleCreateDepartment}>
+                      <h3>Create department</h3>
+                      <label>Department name<input onChange={(event) => setDepartmentDraft(event.target.value)} value={departmentDraft} /></label>
+                      <button className="primary-button" type="submit"><Plus aria-hidden="true" size={17} />Create Department</button>
+                      {departmentMessage ? <p className="success-message">{departmentMessage}</p> : null}
+                    </form>
+                  ) : null}
+                  <form className="person-form management-form" onSubmit={handleCreatePerson}>
+                    <h3>Create user</h3>
+                    <input name="name" placeholder="Full name" />
+                    <input name="username" placeholder="username@mabunited.com" type="email" />
+                    <input name="password" placeholder="Temporary password" type="password" />
+                    {currentUser.role === "superadmin" ? <>
+                      <select name="department" defaultValue={departments[0]}>{departments.map((department) => <option key={department} value={department}>{department}</option>)}</select>
+                      <select name="role" defaultValue="user"><option value="user">Normal User</option><option value="admin">Admin</option><option value="superadmin">Super Admin</option></select>
+                    </> : <input readOnly value={`${currentUser.department} - Normal User`} />}
+                    <button className="primary-button" type="submit"><Plus aria-hidden="true" size={17} />Create User</button>
+                    {peopleMessage ? <p className="success-message">{peopleMessage}</p> : null}
+                  </form>
+                </div>
+              </details>
+            ) : null}
             <div className="directory-grid">
               {visibleUsers.map((user) => {
                 const metrics = user.role === "user" ? userMetrics(user.id) : null;
@@ -2440,7 +2711,24 @@ export function App() {
                         <strong style={{ color: identityColor(message.authorId, currentUser.id) }}>{message.authorName}</strong>
                         <span>{message.createdAt}</span>
                       </div>
-                      <p>{message.body}</p>
+                      {editingChatMessageId === message.id ? (
+                        <div className="message-edit-form chat-message-edit">
+                          <input
+                            autoFocus
+                            maxLength={2000}
+                            onChange={(event) => setChatMessageEditDraft(event.target.value)}
+                            value={chatMessageEditDraft}
+                          />
+                          <button className="icon-button" onClick={() => saveChatMessage(message.id)} type="button" aria-label="Save message"><Save aria-hidden="true" size={15} /></button>
+                          <button className="icon-button" onClick={() => { setEditingChatMessageId(""); setChatMessageEditDraft(""); }} type="button" aria-label="Cancel editing"><X aria-hidden="true" size={15} /></button>
+                        </div>
+                      ) : <p>{message.body}</p>}
+                      {message.authorId === currentUser.id && editingChatMessageId !== message.id ? (
+                        <div className="message-actions">
+                          <button onClick={() => { setEditingChatMessageId(message.id); setChatMessageEditDraft(message.body); }} type="button"><Edit3 aria-hidden="true" size={13} />Edit</button>
+                          <button className="danger" onClick={() => deleteChatMessage(message.id)} type="button"><Trash2 aria-hidden="true" size={13} />Delete</button>
+                        </div>
+                      ) : null}
                     </article>
                   )) : (
                     <p className="empty-state">No messages yet. Say hello to your department.</p>
@@ -2502,6 +2790,59 @@ export function App() {
           </section>
         )}
       </section>
+      {showTaskComposer && canAllocateTasks ? (
+        <div className="task-composer-backdrop" role="presentation" onMouseDown={() => setShowTaskComposer(false)}>
+          <section className="task-composer-dialog" role="dialog" aria-modal="true" aria-labelledby="new-task-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="task-composer-header">
+              <div><p>Available from every workspace</p><h2 id="new-task-title">Create New Task</h2></div>
+              <button className="icon-button" onClick={() => setShowTaskComposer(false)} type="button" aria-label="Close new task form"><X aria-hidden="true" size={17} /></button>
+            </div>
+            <form className="person-form task-composer-form" onSubmit={handleAllocateTask}>
+              <input onChange={(event) => setTaskDraft((draft) => ({ ...draft, title: event.target.value }))} placeholder="Task title" value={taskDraft.title} />
+              <label>Project
+                <select
+                  onChange={(event) => {
+                    const project = projects.find((item) => item.id === event.target.value);
+                    setTaskDraft((draft) => ({ ...draft, projectId: project?.id ?? "", department: project?.department ?? draft.department, assigneeIds: [] }));
+                  }}
+                  value={taskDraft.projectId}
+                >
+                  <option value="">No project</option>
+                  {projects.map((project) => <option key={project.id} value={project.id}>{project.name} - {project.department}</option>)}
+                </select>
+              </label>
+              {currentUser.role === "superadmin" && !taskDraft.projectId ? (
+                <label>Department
+                  <select onChange={(event) => setTaskDraft((draft) => ({ ...draft, department: event.target.value as DepartmentName, assigneeIds: [] }))} value={taskDraft.department}>
+                    {departments.map((department) => <option key={department} value={department}>{department}</option>)}
+                  </select>
+                </label>
+              ) : null}
+              <label className="multi-select-field task-composer-candidates">Assign people
+                <CandidatePicker
+                  candidates={taskDraftAssignableUsers}
+                  emptyMessage={selectedDraftProject ? "This project has no available members. Add people to the project first." : `No normal users are available in ${taskDraft.department}.`}
+                  onChange={(assigneeIds) => setTaskDraft((draft) => ({ ...draft, assigneeIds }))}
+                  selectedIds={taskDraft.assigneeIds}
+                />
+              </label>
+              <div className="task-composer-grid">
+                <label>Task type<select onChange={(event) => setTaskDraft((draft) => ({ ...draft, taskType: event.target.value as TaskType }))} value={taskDraft.taskType}>{taskTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
+                <label>Priority<select onChange={(event) => setTaskDraft((draft) => ({ ...draft, priority: event.target.value as TaskPriority }))} value={taskDraft.priority}><option value="low">Low priority</option><option value="medium">Medium priority</option><option value="high">High priority</option><option value="urgent">Urgent priority</option></select></label>
+                <label>Due date<input onChange={(event) => setTaskDraft((draft) => ({ ...draft, dueDate: event.target.value }))} type="date" value={taskDraft.dueDate} /></label>
+                <label>Initial progress<input max="100" min="0" onChange={(event) => setTaskDraft((draft) => ({ ...draft, progress: Number(event.target.value) }))} type="number" value={taskDraft.progress} /></label>
+              </div>
+              <label className="file-upload task-create-files"><Paperclip aria-hidden="true" size={16} />Add task documents<input multiple onChange={(event) => setTaskFiles(Array.from(event.target.files ?? []))} type="file" /></label>
+              {taskFiles.length ? <p className="selected-files">{taskFiles.map((file) => file.name).join(", ")}</p> : null}
+              {allocationMessage ? <p className="success-message">{allocationMessage}</p> : null}
+              <div className="task-composer-actions">
+                <button className="ghost-button" onClick={() => setShowTaskComposer(false)} type="button">Cancel</button>
+                <button className="primary-button" type="submit"><Plus aria-hidden="true" size={17} />Create Task</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
       {confirmation ? (
         <div className="confirmation-backdrop" role="presentation" onMouseDown={() => setConfirmation(null)}>
           <section className="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-confirmation-title" onMouseDown={(event) => event.stopPropagation()}>

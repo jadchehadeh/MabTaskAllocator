@@ -266,6 +266,10 @@ export const api = {
     request(`/api/tasks/${taskId}/reopen`, { method: "POST", body: JSON.stringify({ comment }) }),
   addMessage: (taskId: string, body: string) =>
     request(`/api/tasks/${taskId}/messages`, { method: "POST", body: JSON.stringify({ body }) }),
+  updateTaskMessage: (taskId: string, messageId: string, body: string) =>
+    request<{ task: ManagedTask }>(`/api/tasks/${taskId}/messages/${messageId}`, { method: "PUT", body: JSON.stringify({ body }) }),
+  deleteTaskMessage: (taskId: string, messageId: string) =>
+    request<{ task: ManagedTask }>(`/api/tasks/${taskId}/messages/${messageId}`, { method: "DELETE" }),
   async addFiles(taskId: string, files: File[]) {
     return request(`/api/tasks/${taskId}/files`, {
       method: "POST",
@@ -304,5 +308,9 @@ export const api = {
     request(`/api/chat/groups/${channelId.replace(/^group:/, "")}`, { method: "DELETE" }),
   sendChatMessage: (channelId: string, body: string) =>
     request("/api/chat/messages", { method: "POST", body: JSON.stringify({ channelId, body }) }),
+  updateChatMessage: (messageId: string, body: string) =>
+    request(`/api/chat/messages/${messageId}`, { method: "PUT", body: JSON.stringify({ body }) }),
+  deleteChatMessage: (messageId: string) =>
+    request(`/api/chat/messages/${messageId}`, { method: "DELETE" }),
   markNotificationsRead: () => request("/api/notifications/read", { method: "POST" })
 };

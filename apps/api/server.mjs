@@ -119,6 +119,10 @@ function publicUser(row) {
   };
 }
 
+function sameDepartment(first, second) {
+  return String(first ?? "").trim().toLocaleLowerCase() === String(second ?? "").trim().toLocaleLowerCase();
+}
+
 function formatDate(value) {
   if (!value) return undefined;
   return new Date(`${value.replace(" ", "T")}Z`).toLocaleString("en-GB", {
@@ -324,7 +328,7 @@ async function validTaskAssignees(ids, department, projectId = null) {
   if (!uniqueIds.length) return [];
   const users = await db.prepare(`
     SELECT * FROM users WHERE id IN (${uniqueIds.map(() => "?").join(",")})
-      AND role = 'user' AND department = ?
+      AND role = 'user' AND lower(trim(department)) = lower(trim(?))
   `).all(...uniqueIds, department);
   if (users.length !== uniqueIds.length) throw new Error("Every assignee must be a normal user in the task department.");
   if (projectId) {
@@ -807,7 +811,7 @@ function requireManager(user) {
 
 function validateUserScope(actor, target) {
   requireManager(actor);
-  if (actor.role === "admin" && (target.role !== "user" || target.department !== actor.department)) {
+  if (actor.role === "admin" && (target.role !== "user" || !sameDepartment(target.department, actor.department))) {
     const error = new Error("Admins can manage normal users in their own department only.");
     error.status = 403;
     throw error;
@@ -897,7 +901,7 @@ const server = createServer(async (request, response) => {
       requireManager(actor);
       const target = await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(reportMatch[1]);
       if (!target) return send(response, 404, { message: "Normal user not found." });
-      if (actor.role === "admin" && target.department !== actor.department) {
+      if (actor.role === "admin" && !sameDepartment(target.department, actor.department)) {
         return send(response, 403, { message: "Admins can export reports for their own department only." });
       }
       await touchSession(request);
@@ -1084,7 +1088,7 @@ const server = createServer(async (request, response) => {
       requireManager(actor);
       const project = await db.prepare("SELECT * FROM projects WHERE id = ?").get(projectTemplateMatch[1]);
       if (!project) return send(response, 404, { message: "Project not found." });
-      if (actor.role === "admin" && project.department !== actor.department) {
+      if (actor.role === "admin" && !sameDepartment(project.department, actor.department)) {
         return send(response, 403, { message: "You cannot export this project task sheet." });
       }
       const data = await buildProjectTaskTemplate(project);
@@ -1097,7 +1101,7 @@ const server = createServer(async (request, response) => {
       requireManager(actor);
       const project = await db.prepare("SELECT * FROM projects WHERE id = ?").get(projectImportMatch[1]);
       if (!project) return send(response, 404, { message: "Project not found." });
-      if (actor.role === "admin" && project.department !== actor.department) {
+      if (actor.role === "admin" && !sameDepartment(project.department, actor.department)) {
         return send(response, 403, { message: "You cannot import tasks into this project." });
       }
       const importedTasks = await parseTaskSheet(body.file);
@@ -1139,7 +1143,7 @@ const server = createServer(async (request, response) => {
       requireManager(actor);
       const project = await db.prepare("SELECT * FROM projects WHERE id = ?").get(projectMatch[1]);
       if (!project) return send(response, 404, { message: "Project not found." });
-      if (actor.role === "admin" && project.department !== actor.department) return send(response, 403, { message: "You cannot edit this project." });
+      if (actor.role === "admin" && !sameDepartment(project.department, actor.department)) return send(response, 403, { message: "You cannot edit this project." });
       const members = await validTaskAssignees(body.memberIds, project.department);
       await db.transaction(async () => {
         await db.prepare("UPDATE projects SET name = ?, description = ? WHERE id = ?")
@@ -1168,7 +1172,7 @@ const server = createServer(async (request, response) => {
       requireManager(actor);
       const project = await db.prepare("SELECT * FROM projects WHERE id = ?").get(projectMatch[1]);
       if (!project) return send(response, 404, { message: "Project not found." });
-      if (actor.role === "admin" && project.department !== actor.department) return send(response, 403, { message: "You cannot delete this project." });
+      if (actor.role === "admin" && !sameDepartment(project.department, actor.department)) return send(response, 403, { message: "You cannot delete this project." });
       await db.prepare("UPDATE tasks SET project_id = NULL WHERE project_id = ?").run(project.id);
       await db.prepare("DELETE FROM projects WHERE id = ?").run(project.id);
       return send(response, 200, { ok: true });
@@ -1182,7 +1186,7 @@ const server = createServer(async (request, response) => {
       const firstRequested = requestedIds[0] ? await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(requestedIds[0]) : null;
       const department = project?.department ?? firstRequested?.department ?? (actor.role === "admin" ? actor.department : body.department);
       await requireDepartment(department);
-      if (actor.role === "admin" && department !== actor.department) return send(response, 403, { message: "Admins can create tasks in their department only." });
+      if (actor.role === "admin" && !sameDepartment(department, actor.department)) return send(response, 403, { message: "Admins can create tasks in their department only." });
       const assignees = await validTaskAssignees(requestedIds, department, project?.id ?? null);
       const task = {
         id: randomUUID(),
@@ -1225,7 +1229,7 @@ const server = createServer(async (request, response) => {
       const requestedIds = Array.isArray(body.assigneeIds) ? body.assigneeIds : body.assigneeId ? [body.assigneeId] : [];
       const department = project?.department ?? body.department ?? existing.department;
       await requireDepartment(department);
-      if (actor.role === "admin" && department !== actor.department) return send(response, 403, { message: "Admins can edit tasks in their department only." });
+      if (actor.role === "admin" && !sameDepartment(department, actor.department)) return send(response, 403, { message: "Admins can edit tasks in their department only." });
       const assignees = await validTaskAssignees(requestedIds, department, project?.id ?? null);
       const previousIds = await taskAssigneeIds(existing.id);
       await db.prepare(`
@@ -1254,6 +1258,25 @@ const server = createServer(async (request, response) => {
         try { unlinkSync(join(attachmentsPath, basename(file.storage_name))); } catch { /* Already absent. */ }
       }
       return send(response, 200, { ok: true });
+    }
+
+    const taskMessageMatch = path.match(/^\/api\/tasks\/([^/]+)\/messages\/([^/]+)$/);
+    if (taskMessageMatch && ["PUT", "DELETE"].includes(request.method)) {
+      const task = await getTask(taskMessageMatch[1]);
+      if (!task || !await canView(actor, task)) return send(response, 404, { message: "Task comment not found." });
+      const message = await db.prepare("SELECT * FROM task_messages WHERE id = ? AND task_id = ?")
+        .get(taskMessageMatch[2], task.id);
+      if (!message) return send(response, 404, { message: "Task comment not found." });
+      if (message.author_id !== actor.id) return send(response, 403, { message: "You can change only your own comments." });
+      if (request.method === "PUT") {
+        const nextBody = String(body.body ?? "").trim().slice(0, 2000);
+        if (!nextBody) throw new Error("Comment cannot be empty.");
+        await db.prepare("UPDATE task_messages SET body = ? WHERE id = ?").run(nextBody, message.id);
+      } else {
+        await db.prepare("DELETE FROM task_messages WHERE id = ?").run(message.id);
+      }
+      await touchSession(request);
+      return send(response, 200, { task: await serializeTask(task) });
     }
 
     const actionMatch = path.match(/^\/api\/tasks\/([^/]+)\/(claim|submit|approve|reopen|messages|files)$/);
@@ -1350,7 +1373,7 @@ const server = createServer(async (request, response) => {
       requireManager(actor);
       const group = await db.prepare("SELECT * FROM chat_groups WHERE id = ?").get(chatGroupMatch[1]);
       if (!group) return send(response, 404, { message: "Chat group not found." });
-      if (actor.role === "admin" && group.department !== actor.department) {
+      if (actor.role === "admin" && !sameDepartment(group.department, actor.department)) {
         return send(response, 403, { message: "Admins can delete group chats in their own department only." });
       }
       const channelId = `group:${group.id}`;
@@ -1387,6 +1410,22 @@ const server = createServer(async (request, response) => {
       `).run(randomUUID(), channelId, department, actor.id, actor.name, message);
       await touchSession(request);
       return send(response, 201, { ok: true });
+    }
+
+    const chatMessageMatch = path.match(/^\/api\/chat\/messages\/([^/]+)$/);
+    if (chatMessageMatch && ["PUT", "DELETE"].includes(request.method)) {
+      const message = await db.prepare("SELECT * FROM chat_messages WHERE id = ?").get(chatMessageMatch[1]);
+      if (!message) return send(response, 404, { message: "Chat message not found." });
+      if (message.author_id !== actor.id) return send(response, 403, { message: "You can change only your own messages." });
+      if (request.method === "PUT") {
+        const nextBody = String(body.body ?? "").trim().slice(0, 2000);
+        if (!nextBody) throw new Error("Message cannot be empty.");
+        await db.prepare("UPDATE chat_messages SET body = ? WHERE id = ?").run(nextBody, message.id);
+      } else {
+        await db.prepare("DELETE FROM chat_messages WHERE id = ?").run(message.id);
+      }
+      await touchSession(request);
+      return send(response, 200, { ok: true });
     }
 
     return send(response, 404, { message: "Route not found." });
