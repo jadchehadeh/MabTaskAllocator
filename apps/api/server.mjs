@@ -814,6 +814,17 @@ function validateUserScope(actor, target) {
   }
 }
 
+async function requireDepartment(name) {
+  const department = await db.prepare("SELECT name FROM departments WHERE lower(name) = lower(?)")
+    .get(String(name ?? "").trim());
+  if (!department) {
+    const error = new Error("Choose a valid department.");
+    error.status = 400;
+    throw error;
+  }
+  return department.name;
+}
+
 const server = createServer(async (request, response) => {
   if (request.method === "OPTIONS") return send(response, 204, {});
 
@@ -899,6 +910,8 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "GET" && path === "/api/bootstrap") {
       const users = (await db.prepare("SELECT * FROM users ORDER BY name").all()).map(publicUser);
+      const departments = (await db.prepare("SELECT name FROM departments ORDER BY name").all())
+        .map((item) => item.name);
       const taskRows = await db.prepare(`
         SELECT tasks.*, projects.name AS project_name
         FROM tasks LEFT JOIN projects ON projects.id = tasks.project_id
@@ -923,6 +936,7 @@ const server = createServer(async (request, response) => {
       }));
       return send(response, 200, {
         currentUser: actor,
+        departments,
         users,
         tasks,
         projects: await projectsFor(actor),
@@ -930,6 +944,19 @@ const server = createServer(async (request, response) => {
         todos: await todosFor(actor.id),
         ...(await chatDataFor(actor))
       });
+    }
+
+    if (request.method === "POST" && path === "/api/departments") {
+      if (actor.role !== "superadmin") {
+        return send(response, 403, { message: "Only Super Admin can create departments." });
+      }
+      const name = String(body.name ?? "").trim().replace(/\s+/g, " ").slice(0, 120);
+      if (name.length < 2) throw new Error("Enter a department name.");
+      const existing = await db.prepare("SELECT id FROM departments WHERE lower(name) = lower(?)").get(name);
+      if (existing) return send(response, 409, { message: "This department already exists." });
+      await db.prepare("INSERT INTO departments (id, name, created_by_id) VALUES (?, ?, ?)")
+        .run(`department-${randomUUID()}`, name, actor.id);
+      return send(response, 201, { department: name });
     }
 
     if (request.method === "POST" && path === "/api/todos") {
@@ -990,6 +1017,7 @@ const server = createServer(async (request, response) => {
         department: actor.role === "admin" ? actor.department : body.department
       };
       validateUserScope(actor, target);
+      target.department = await requireDepartment(target.department);
       if (!target.name || !target.username || !target.password) throw new Error("Name, username, and password are required.");
       await db.prepare(`
         INSERT INTO users (id, name, username, password_hash, role, department)
@@ -1010,6 +1038,7 @@ const server = createServer(async (request, response) => {
         department: actor.role === "admin" ? actor.department : body.department
       };
       validateUserScope(actor, target);
+      target.department = await requireDepartment(target.department);
       await db.prepare("UPDATE users SET name = ?, username = ?, role = ?, department = ? WHERE id = ?")
         .run(target.name, target.username, target.role, target.department, target.id);
       if (body.password) await db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(body.password), target.id);
@@ -1037,6 +1066,7 @@ const server = createServer(async (request, response) => {
       const name = String(body.name ?? "").trim().slice(0, 140);
       const description = String(body.description ?? "").trim().slice(0, 2000);
       if (!name || !department || department === "Executive") throw new Error("Project name and department are required.");
+      await requireDepartment(department);
       const members = await validTaskAssignees(body.memberIds, department);
       const id = randomUUID();
       await db.transaction(async () => {
@@ -1151,6 +1181,7 @@ const server = createServer(async (request, response) => {
       const requestedIds = Array.isArray(body.assigneeIds) ? body.assigneeIds : body.assigneeId ? [body.assigneeId] : [];
       const firstRequested = requestedIds[0] ? await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(requestedIds[0]) : null;
       const department = project?.department ?? firstRequested?.department ?? (actor.role === "admin" ? actor.department : body.department);
+      await requireDepartment(department);
       if (actor.role === "admin" && department !== actor.department) return send(response, 403, { message: "Admins can create tasks in their department only." });
       const assignees = await validTaskAssignees(requestedIds, department, project?.id ?? null);
       const task = {
@@ -1193,6 +1224,7 @@ const server = createServer(async (request, response) => {
       if (body.projectId && !project) return send(response, 404, { message: "Project not found." });
       const requestedIds = Array.isArray(body.assigneeIds) ? body.assigneeIds : body.assigneeId ? [body.assigneeId] : [];
       const department = project?.department ?? body.department ?? existing.department;
+      await requireDepartment(department);
       if (actor.role === "admin" && department !== actor.department) return send(response, 403, { message: "Admins can edit tasks in their department only." });
       const assignees = await validTaskAssignees(requestedIds, department, project?.id ?? null);
       const previousIds = await taskAssigneeIds(existing.id);
@@ -1291,7 +1323,7 @@ const server = createServer(async (request, response) => {
       const name = String(body.name ?? "").trim().slice(0, 80);
       const department = actor.role === "admin" ? actor.department : String(body.department ?? "").trim();
       if (!name) throw new Error("Group name is required.");
-      const departmentExists = await db.prepare("SELECT id FROM users WHERE department = ? LIMIT 1").get(department);
+      const departmentExists = await db.prepare("SELECT id FROM departments WHERE lower(name) = lower(?) LIMIT 1").get(department);
       if (!departmentExists || department === "Executive") throw new Error("Choose a valid department.");
       const id = randomUUID();
       await db.prepare("INSERT INTO chat_groups (id, name, department, created_by_id) VALUES (?, ?, ?, ?)")

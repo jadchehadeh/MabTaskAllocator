@@ -8,6 +8,15 @@ CREATE TABLE IF NOT EXISTS users (
   created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
 );
 
+CREATE TABLE IF NOT EXISTS departments (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  created_by_id text REFERENCES users(id) ON DELETE SET NULL,
+  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_departments_name_ci ON departments (lower(name));
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_ci ON users (lower(username));
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -149,3 +158,22 @@ CREATE INDEX IF NOT EXISTS idx_chat_groups_department ON chat_groups(department,
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_groups_task ON chat_groups(task_id) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_messages_department ON chat_messages(department, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_channel ON chat_messages(channel_id, created_at DESC);
+
+INSERT INTO departments (id, name)
+VALUES
+  ('department-executive', 'Executive'),
+  ('department-mechanical', 'Mechanical Technical office engineer'),
+  ('department-electrical', 'Electrical Technical office engineer'),
+  ('department-document-control', 'Document Controller')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO departments (id, name)
+SELECT 'department-' || md5(department), department
+FROM (
+  SELECT department FROM users
+  UNION SELECT department FROM projects
+  UNION SELECT department FROM tasks
+  UNION SELECT department FROM chat_groups
+) existing_departments
+WHERE department IS NOT NULL AND department != ''
+ON CONFLICT DO NOTHING;

@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Archive,
   Bell,
+  Building2,
   CheckCircle2,
   ClipboardList,
   Download,
@@ -37,7 +38,7 @@ import { StatCard } from "./components/StatCard";
 
 const mabLogo = "/mab-logo.jpeg";
 
-const departments: DepartmentName[] = [
+const defaultDepartments: DepartmentName[] = [
   "Mechanical Technical office engineer",
   "Electrical Technical office engineer",
   "Document Controller"
@@ -49,7 +50,7 @@ const themeKeyPrefix = "mab-task-allocator.theme.";
 function storedDarkMode(ownerId: string) {
   const savedTheme = window.localStorage.getItem(`${themeKeyPrefix}${ownerId}`);
   if (savedTheme) return savedTheme === "dark";
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+  return false;
 }
 const quickEmojis = ["👍", "✅", "👀", "🙏", "📌", "🚧", "🎉", "😊"];
 
@@ -132,8 +133,8 @@ interface LoginPageProps {
 }
 
 function LoginPage({ darkMode, error, onLogin, onToggleTheme }: LoginPageProps) {
-  const [username, setUsername] = useState("j.chehade@mabunited.com");
-  const [password, setPassword] = useState("jadjadjad1");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -186,7 +187,6 @@ function LoginPage({ darkMode, error, onLogin, onToggleTheme }: LoginPageProps) 
               <input
                 autoComplete="username"
                 onChange={(event) => setUsername(event.target.value)}
-                placeholder="name@mabunited.com"
                 type="email"
                 value={username}
               />
@@ -200,7 +200,6 @@ function LoginPage({ darkMode, error, onLogin, onToggleTheme }: LoginPageProps) 
               <input
                 autoComplete="current-password"
                 onChange={(event) => setPassword(event.target.value)}
-                placeholder="Enter password"
                 type="password"
                 value={password}
               />
@@ -214,10 +213,6 @@ function LoginPage({ darkMode, error, onLogin, onToggleTheme }: LoginPageProps) 
             Login to Dashboard
           </button>
 
-          <div className="credential-note">
-            <strong>Superadmin</strong>
-            <span>j.chehade@mabunited.com / jadjadjad1</span>
-          </div>
         </form>
       </section>
     </main>
@@ -230,6 +225,7 @@ export function App() {
     ownerId: "login"
   }));
   const [users, setUsers] = useState<AppUser[]>([]);
+  const [departments, setDepartments] = useState<DepartmentName[]>(defaultDepartments);
   const [tasks, setTasks] = useState<ManagedTask[]>([]);
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
@@ -241,7 +237,7 @@ export function App() {
   const [chatDraft, setChatDraft] = useState("");
   const [chatStatus, setChatStatus] = useState("");
   const [showGroupForm, setShowGroupForm] = useState(false);
-  const [groupDraft, setGroupDraft] = useState({ name: "", department: departments[0] });
+  const [groupDraft, setGroupDraft] = useState({ name: "", department: defaultDepartments[0] });
   const [editingChatGroupId, setEditingChatGroupId] = useState("");
   const [chatGroupNameDraft, setChatGroupNameDraft] = useState("");
   const [activeView, setActiveView] = useState<
@@ -251,6 +247,8 @@ export function App() {
   const [appLoading, setAppLoading] = useState(hasSession());
   const [loginError, setLoginError] = useState("");
   const [peopleMessage, setPeopleMessage] = useState("");
+  const [departmentDraft, setDepartmentDraft] = useState("");
+  const [departmentMessage, setDepartmentMessage] = useState("");
   const [allocationMessage, setAllocationMessage] = useState("");
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<AppUser | null>(null);
@@ -324,7 +322,7 @@ export function App() {
   const [projectDraft, setProjectDraft] = useState({
     name: "",
     description: "",
-    department: departments[0],
+    department: defaultDepartments[0],
     memberIds: [] as string[]
   });
   const [projectMessage, setProjectMessage] = useState("");
@@ -345,6 +343,7 @@ export function App() {
     try {
       const data = await api.bootstrap();
       setCurrentUser(data.currentUser);
+      setDepartments(data.departments?.length ? data.departments : defaultDepartments);
       setUsers(data.users);
       setTasks(data.tasks);
       setTodos(data.todos);
@@ -680,6 +679,24 @@ export function App() {
   function getFormRole(formData: FormData): UserRole {
     if (currentUser?.role === "admin") return "user";
     return String(formData.get("role") ?? "user") as UserRole;
+  }
+
+  async function handleCreateDepartment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (currentUser?.role !== "superadmin") return;
+    const name = departmentDraft.trim();
+    if (!name) {
+      setDepartmentMessage("Enter a department name.");
+      return;
+    }
+    try {
+      const result = await api.createDepartment(name);
+      await refreshData(true);
+      setDepartmentDraft("");
+      setDepartmentMessage(`${result.department} was created.`);
+    } catch (error) {
+      setDepartmentMessage(error instanceof Error ? error.message : "Could not create this department.");
+    }
   }
 
   async function handleCreatePerson(event: FormEvent<HTMLFormElement>) {
@@ -1667,6 +1684,36 @@ export function App() {
 
         {activeView === "dashboard" && (canManagePeople || canAllocateTasks) ? (
           <section className="admin-grid" id="people">
+            {currentUser.role === "superadmin" ? (
+              <section className="panel command-panel department-panel">
+                <div className="panel-header">
+                  <div>
+                    <p>Organization structure</p>
+                    <h2>Create Department</h2>
+                  </div>
+                  <Building2 aria-hidden="true" />
+                </div>
+                <form className="person-form" onSubmit={handleCreateDepartment}>
+                  <label>
+                    Department name
+                    <input
+                      aria-label="Department name"
+                      onChange={(event) => setDepartmentDraft(event.target.value)}
+                      value={departmentDraft}
+                    />
+                  </label>
+                  <button type="submit" className="primary-button">
+                    <Plus aria-hidden="true" size={18} />
+                    Create Department
+                  </button>
+                </form>
+                <div className="department-list" aria-label="Available departments">
+                  {departments.map((department) => <span key={department}>{department}</span>)}
+                </div>
+                {departmentMessage ? <p className="success-message">{departmentMessage}</p> : null}
+              </section>
+            ) : null}
+
             {canManagePeople ? (
               <section className="panel command-panel">
                 <div className="panel-header">

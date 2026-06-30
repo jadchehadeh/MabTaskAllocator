@@ -6,11 +6,7 @@ export type TaskType = "Technical" | "QS" | "Shop Drawings" | "BIM" | "Variation
 
 export type UserRole = "superadmin" | "admin" | "user";
 
-export type DepartmentName =
-  | "Executive"
-  | "Mechanical Technical office engineer"
-  | "Electrical Technical office engineer"
-  | "Document Controller";
+export type DepartmentName = string;
 
 export interface AppUser {
   id: string;

@@ -5,6 +5,7 @@ The database is initialized from `infra/postgres/init.sql` when the Docker volum
 ## Main Tables
 
 - `users`
+- `departments`
 - `sessions`
 - `projects`
 - `project_members`

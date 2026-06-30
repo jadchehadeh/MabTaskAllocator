@@ -308,20 +308,6 @@ select:focus {
   min-height: 52px;
 }
 
-.credential-note {
-  background: var(--mab-blue-soft);
-  border: 1px solid var(--mab-border);
-  border-radius: 8px;
-  color: var(--mab-text-muted);
-  display: grid;
-  gap: 4px;
-  padding: 14px;
-}
-
-.credential-note strong {
-  color: var(--mab-blue-dark);
-}
-
 .app-shell {
   background:
     linear-gradient(180deg, rgba(17, 120, 184, 0.1), transparent 320px),
@@ -752,6 +738,30 @@ select:focus {
 .person-form {
   display: grid;
   gap: 12px;
+}
+
+.person-form > label {
+  color: var(--mab-text);
+  display: grid;
+  font-weight: 800;
+  gap: 8px;
+}
+
+.department-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.department-list span {
+  background: var(--mab-blue-soft);
+  border: 1px solid var(--mab-border);
+  border-radius: 999px;
+  color: var(--mab-blue-dark);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 7px 10px;
 }
 
 .person-form .primary-button {

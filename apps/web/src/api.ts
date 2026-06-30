@@ -100,6 +100,7 @@ export type TodoItem = {
 
 export type BootstrapData = {
   currentUser: AppUser;
+  departments: DepartmentName[];
   users: AppUser[];
   tasks: ManagedTask[];
   projects: Project[];
@@ -231,6 +232,11 @@ export const api = {
   },
   touchSession: () => request<{ ok: boolean }>("/api/auth/activity", { method: "POST" }),
   bootstrap: () => request<BootstrapData>("/api/bootstrap"),
+  createDepartment: (name: string) =>
+    request<{ department: DepartmentName }>("/api/departments", {
+      method: "POST",
+      body: JSON.stringify({ name })
+    }),
   createTodo: (todo: { title: string; taskId?: string }) =>
     request<{ todo: TodoItem }>("/api/todos", { method: "POST", body: JSON.stringify(todo) }),
   updateTodo: (todo: TodoItem) =>
