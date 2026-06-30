@@ -76,6 +76,18 @@ const roleLabels: Record<UserRole, string> = {
   user: "Normal User"
 };
 
+const viewTitles = {
+  dashboard: "Command Center",
+  projects: "Projects",
+  tasks: "Active Tasks",
+  todos: "My TODOs",
+  finished: "Finished Tasks",
+  people: "People Directory",
+  team: "Team Performance",
+  productivity: "Productivity",
+  chat: "Department Chat"
+} as const;
+
 function clampProgress(progress: number) {
   return Math.min(100, Math.max(0, progress));
 }
@@ -1514,6 +1526,7 @@ export function App() {
             <span>{roleLabels[currentUser.role]}</span>
           </div>
         </div>
+        <p className="sidebar-nav-label">Workspace</p>
         <nav>
           <button
             type="button"
@@ -1597,6 +1610,16 @@ export function App() {
             </button>
           ) : null}
         </nav>
+        <div className="sidebar-user">
+          <span className="user-avatar" aria-hidden="true">
+            {currentUser.name.split(" ").slice(0, 2).map((part) => part[0]).join("").toUpperCase()}
+          </span>
+          <div>
+            <strong>{currentUser.name}</strong>
+            <span>{currentUser.department}</span>
+          </div>
+          <span className="online-dot" title="Online" />
+        </div>
       </aside>
 
       <section className="workspace">
@@ -1604,8 +1627,8 @@ export function App() {
           <div className="topbar-title">
             <img src={mabLogo} alt="" aria-hidden="true" />
             <div>
-              <p>{currentUser.department}</p>
-              <h1>{roleLabels[currentUser.role]} Dashboard</h1>
+              <p>{currentUser.department} / {viewTitles[activeView]}</p>
+              <h1>{viewTitles[activeView]}</h1>
             </div>
           </div>
           <div className="topbar-actions">
@@ -1650,11 +1673,12 @@ export function App() {
             </div>
             <button type="button" className="ghost-button" onClick={handleLogout}>
               <LogOut aria-hidden="true" size={18} />
-              Logout
+              <span>Logout</span>
             </button>
           </div>
         </header>
 
+        {activeView === "dashboard" ? <>
         <section className="brand-strip" id="dashboard">
           <div>
             <img src={mabLogo} alt="MAB logo" />
@@ -1681,6 +1705,7 @@ export function App() {
           <StatCard label="Visible People" value={String(visibleUsers.length)} icon={Users} tone="green" />
           <StatCard label="Avg Progress" value={`${averageProgress}%`} icon={Gauge} tone="amber" />
         </section>
+        </> : null}
 
         {activeView === "dashboard" && (canManagePeople || canAllocateTasks) ? (
           <section className="admin-grid" id="people">
