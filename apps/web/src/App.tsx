@@ -12,15 +12,18 @@ import {
   Gauge,
   Hand,
   KeyRound,
+  ListTodo,
   Lock,
   LogOut,
   MessageSquare,
+  Moon,
   Paperclip,
   Plus,
   RotateCcw,
   Save,
   ShieldCheck,
   Sparkles,
+  Sun,
   Trash2,
   Upload,
   UserPlus,
@@ -29,7 +32,7 @@ import {
 } from "lucide-react";
 import type { AppUser, DepartmentName, TaskPriority, TaskStatus, TaskType, UserRole } from "@mab/shared";
 import { api, getLastActivity, hasSession, inactivityLimitMs, markActivity } from "./api";
-import type { AppNotification, ChatChannel, ChatMessage, ManagedTask, Project } from "./api";
+import type { AppNotification, ChatChannel, ChatMessage, ManagedTask, Project, TodoItem } from "./api";
 import { StatCard } from "./components/StatCard";
 
 const mabLogo = "/mab-logo.jpeg";
@@ -41,6 +44,14 @@ const departments: DepartmentName[] = [
 ];
 
 const taskTypes: TaskType[] = ["Technical", "QS", "Shop Drawings", "BIM", "Variation"];
+const themeKeyPrefix = "mab-task-allocator.theme.";
+
+function storedDarkMode(ownerId: string) {
+  const savedTheme = window.localStorage.getItem(`${themeKeyPrefix}${ownerId}`);
+  if (savedTheme) return savedTheme === "dark";
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+}
+const quickEmojis = ["👍", "✅", "👀", "🙏", "📌", "🚧", "🎉", "😊"];
 
 const priorityLabels: Record<TaskPriority, string> = {
   low: "Low",
@@ -105,19 +116,22 @@ function average(values: number[]) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
 }
 
-function identityColor(id: string, currentUserId?: string) {
-  if (id === currentUserId) return "#1178b8";
+function identityColor(id?: string | null, currentUserId?: string) {
+  const safeId = id || "unknown-user";
+  if (safeId === currentUserId) return "#1178b8";
   const colors = ["#7c3aed", "#c2410c", "#047857", "#be185d", "#0369a1", "#a16207"];
-  const hash = [...id].reduce((total, character) => total + character.charCodeAt(0), 0);
+  const hash = [...safeId].reduce((total, character) => total + character.charCodeAt(0), 0);
   return colors[hash % colors.length];
 }
 
 interface LoginPageProps {
+  darkMode: boolean;
   error: string;
   onLogin: (username: string, password: string) => void;
+  onToggleTheme: () => void;
 }
 
-function LoginPage({ error, onLogin }: LoginPageProps) {
+function LoginPage({ darkMode, error, onLogin, onToggleTheme }: LoginPageProps) {
   const [username, setUsername] = useState("j.chehade@mabunited.com");
   const [password, setPassword] = useState("jadjadjad1");
 
@@ -128,6 +142,16 @@ function LoginPage({ error, onLogin }: LoginPageProps) {
 
   return (
     <main className="login-shell">
+      <button
+        aria-label={`Switch to ${darkMode ? "light" : "dark"} mode`}
+        aria-pressed={darkMode}
+        className="theme-toggle login-theme-toggle"
+        onClick={onToggleTheme}
+        type="button"
+      >
+        {darkMode ? <Sun aria-hidden="true" size={18} /> : <Moon aria-hidden="true" size={18} />}
+        {darkMode ? "Light mode" : "Dark mode"}
+      </button>
       <section className="login-hero" aria-label="MAB Task Allocator login">
         <div className="cosmic-panel">
           <div className="orbital-logo">
@@ -201,8 +225,13 @@ function LoginPage({ error, onLogin }: LoginPageProps) {
 }
 
 export function App() {
+  const [themePreference, setThemePreference] = useState(() => ({
+    darkMode: storedDarkMode("login"),
+    ownerId: "login"
+  }));
   const [users, setUsers] = useState<AppUser[]>([]);
   const [tasks, setTasks] = useState<ManagedTask[]>([]);
+  const [todos, setTodos] = useState<TodoItem[]>([]);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -213,8 +242,10 @@ export function App() {
   const [chatStatus, setChatStatus] = useState("");
   const [showGroupForm, setShowGroupForm] = useState(false);
   const [groupDraft, setGroupDraft] = useState({ name: "", department: departments[0] });
+  const [editingChatGroupId, setEditingChatGroupId] = useState("");
+  const [chatGroupNameDraft, setChatGroupNameDraft] = useState("");
   const [activeView, setActiveView] = useState<
-    "dashboard" | "projects" | "tasks" | "finished" | "people" | "team" | "productivity" | "chat"
+    "dashboard" | "projects" | "tasks" | "todos" | "finished" | "people" | "team" | "productivity" | "chat"
   >("dashboard");
   const [showNotifications, setShowNotifications] = useState(false);
   const [appLoading, setAppLoading] = useState(hasSession());
@@ -236,9 +267,50 @@ export function App() {
     priority: "" as "" | TaskPriority,
     status: "done" as "" | TaskStatus
   });
+
+  const themeOwnerId = currentUser?.id ?? "login";
+  const darkMode = themePreference.darkMode;
+
+  useEffect(() => {
+    setThemePreference({
+      darkMode: storedDarkMode(themeOwnerId),
+      ownerId: themeOwnerId
+    });
+  }, [themeOwnerId]);
+
+  useEffect(() => {
+    if (themePreference.ownerId !== themeOwnerId) return;
+    const theme = themePreference.darkMode ? "dark" : "light";
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    window.localStorage.setItem(`${themeKeyPrefix}${themeOwnerId}`, theme);
+  }, [themeOwnerId, themePreference]);
+
+  useEffect(() => {
+    function syncTheme(event: StorageEvent) {
+      if (event.key === `${themeKeyPrefix}${themeOwnerId}` && event.newValue) {
+        setThemePreference({ darkMode: event.newValue === "dark", ownerId: themeOwnerId });
+      }
+    }
+
+    window.addEventListener("storage", syncTheme);
+    return () => window.removeEventListener("storage", syncTheme);
+  }, [themeOwnerId]);
+
+  function toggleTheme() {
+    setThemePreference((preference) => ({
+      darkMode: !(preference.ownerId === themeOwnerId
+        ? preference.darkMode
+        : storedDarkMode(themeOwnerId)),
+      ownerId: themeOwnerId
+    }));
+  }
   const [teamDepartment, setTeamDepartment] = useState("");
   const [teamMonth, setTeamMonth] = useState(new Date().toISOString().slice(0, 7));
   const [productivityMonth, setProductivityMonth] = useState("");
+  const [todoDraft, setTodoDraft] = useState({ title: "", taskId: "" });
+  const [todoFilter, setTodoFilter] = useState<"all" | "open" | "completed">("all");
+  const [todoMessage, setTodoMessage] = useState("");
   const [taskDraft, setTaskDraft] = useState({
     title: "Prepare client visit checklist",
     assigneeIds: [] as string[],
@@ -257,9 +329,17 @@ export function App() {
   });
   const [projectMessage, setProjectMessage] = useState("");
   const [projectMemberDrafts, setProjectMemberDrafts] = useState<Record<string, string[]>>({});
+  const [confirmation, setConfirmation] = useState<{
+    message: string;
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
 
   const canManagePeople = currentUser?.role === "superadmin" || currentUser?.role === "admin";
   const canAllocateTasks = currentUser?.role === "superadmin" || currentUser?.role === "admin";
+
+  function requestConfirmation(message: string, onConfirm: () => Promise<void> | void) {
+    setConfirmation({ message, onConfirm });
+  }
 
   async function refreshData(silent = false) {
     try {
@@ -267,6 +347,7 @@ export function App() {
       setCurrentUser(data.currentUser);
       setUsers(data.users);
       setTasks(data.tasks);
+      setTodos(data.todos);
       setProjects(data.projects);
       setNotifications(data.notifications);
       setChatChannels(data.chatChannels);
@@ -390,6 +471,17 @@ export function App() {
     [visibleTasks]
   );
 
+  const todoLinkableTasks = useMemo(() => activeTasks.filter((task) =>
+    currentUser?.role !== "user" || task.assigneeIds.includes(currentUser.id)
+  ), [activeTasks, currentUser]);
+
+  const openTodos = todos.filter((todo) => !todo.completed);
+  const completedTodos = todos.filter((todo) => todo.completed);
+  const filteredTodos = todos.filter((todo) =>
+    todoFilter === "all" || (todoFilter === "completed" ? todo.completed : !todo.completed)
+  );
+  const todoProgress = todos.length ? Math.round((completedTodos.length / todos.length) * 100) : 0;
+
   const finishedTasks = useMemo(
     () => visibleTasks.filter((task) => task.status === "done"),
     [visibleTasks]
@@ -449,6 +541,10 @@ export function App() {
   const unreadNotifications = notifications.filter((notification) => !notification.isRead).length;
   const selectedChatChannel = chatChannels.find((channel) => channel.id === selectedChannelId);
   const selectedChatMessages = chatMessages.filter((message) => message.channelId === selectedChannelId);
+  const canDeleteSelectedChatGroup = Boolean(selectedChatChannel?.isGroup && (
+    currentUser?.role === "superadmin" ||
+    (currentUser?.role === "admin" && selectedChatChannel.department === currentUser.department)
+  ));
 
   function userMetrics(userId: string, month = "") {
     const assigned = tasks.filter((task) => task.assigneeIds.includes(userId));
@@ -479,6 +575,7 @@ export function App() {
       setCurrentUser(null);
       setUsers([]);
       setTasks([]);
+      setTodos([]);
       setProjects([]);
       setNotifications([]);
       setChatChannels([]);
@@ -493,6 +590,7 @@ export function App() {
       setCurrentUser(null);
       setUsers([]);
       setTasks([]);
+      setTodos([]);
       setProjects([]);
       setNotifications([]);
       setChatChannels([]);
@@ -509,6 +607,21 @@ export function App() {
     }
   }
 
+  async function openDepartmentChat() {
+    setActiveView("chat");
+    setChatStatus("");
+    try {
+      const data = await api.loadChat();
+      setChatChannels(data.chatChannels);
+      setChatMessages(data.chatMessages);
+      const departmentChannel = data.chatChannels.find((channel) =>
+        !channel.isGroup && (currentUser?.role === "superadmin" || channel.department === currentUser?.department));
+      setSelectedChannelId(departmentChannel?.id ?? data.chatChannels[0]?.id ?? "");
+    } catch (error) {
+      setChatStatus(error instanceof Error ? error.message : "Could not open Department Chat.");
+    }
+  }
+
   async function handleLogin(username: string, password: string) {
     try {
       setAppLoading(true);
@@ -518,6 +631,45 @@ export function App() {
       setLoginError(error instanceof Error ? error.message : "Login failed.");
       setAppLoading(false);
     }
+  }
+
+  async function createTodo(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const title = todoDraft.title.trim();
+    if (!title) {
+      setTodoMessage("Write a TODO item first.");
+      return;
+    }
+    try {
+      const { todo } = await api.createTodo({ title, taskId: todoDraft.taskId || undefined });
+      setTodos((items) => [todo, ...items]);
+      setTodoDraft({ title: "", taskId: "" });
+      setTodoMessage("TODO item added.");
+    } catch (error) {
+      setTodoMessage(error instanceof Error ? error.message : "Could not add the TODO item.");
+    }
+  }
+
+  async function toggleTodo(todo: TodoItem) {
+    try {
+      const result = await api.updateTodo({ ...todo, completed: !todo.completed });
+      setTodos((items) => items.map((item) => item.id === todo.id ? result.todo : item));
+      setTodoMessage(result.todo.completed ? "TODO item completed." : "TODO item reopened.");
+    } catch (error) {
+      setTodoMessage(error instanceof Error ? error.message : "Could not update the TODO item.");
+    }
+  }
+
+  function deleteTodo(todo: TodoItem) {
+    requestConfirmation(`Delete the TODO item “${todo.title}”?`, async () => {
+      try {
+        await api.deleteTodo(todo.id);
+        setTodos((items) => items.filter((item) => item.id !== todo.id));
+        setTodoMessage("TODO item deleted.");
+      } catch (error) {
+        setTodoMessage(error instanceof Error ? error.message : "Could not delete the TODO item.");
+      }
+    });
   }
 
   function getFormDepartment(formData: FormData): DepartmentName {
@@ -579,18 +731,18 @@ export function App() {
     }
   }
 
-  async function deleteUser(userId: string) {
+  function deleteUser(userId: string) {
     const user = users.find((person) => person.id === userId);
     if (!user || user.id === currentUser?.id || user.role === "superadmin") return;
-    if (!window.confirm(`Are you sure you want to delete ${user.name}? This cannot be undone.`)) return;
-
-    try {
-      await api.deleteUser(userId);
-      await refreshData(true);
-      setPeopleMessage(`${user.name} was deleted.`);
-    } catch (error) {
-      setPeopleMessage(error instanceof Error ? error.message : "Could not delete this user.");
-    }
+    requestConfirmation(`Are you sure you want to delete ${user.name}? This cannot be undone.`, async () => {
+      try {
+        await api.deleteUser(userId);
+        await refreshData(true);
+        setPeopleMessage(`${user.name} was deleted.`);
+      } catch (error) {
+        setPeopleMessage(error instanceof Error ? error.message : "Could not delete this user.");
+      }
+    });
   }
 
   function canManageTask(task: ManagedTask) {
@@ -715,19 +867,19 @@ export function App() {
     }
   }
 
-  async function deleteTask(task: ManagedTask) {
+  function deleteTask(task: ManagedTask) {
     if (!canManageTask(task)) return;
-    if (!window.confirm(`Are you sure you want to delete "${task.title}"? This will also remove its chat and documents.`)) return;
-
-    try {
-      await api.deleteTask(task.id);
-      await refreshData(true);
-      setEditingTaskId((activeTaskId) => (activeTaskId === task.id ? null : activeTaskId));
-      setTaskEditDraft((draft) => (draft?.id === task.id ? null : draft));
-      setAllocationMessage(`"${task.title}" was deleted.`);
-    } catch (error) {
-      setAllocationMessage(error instanceof Error ? error.message : "Could not delete this task.");
-    }
+    requestConfirmation(`Are you sure you want to delete Task #${task.taskCode} "${task.title}"? Its chat and documents will also be deleted.`, async () => {
+      try {
+        await api.deleteTask(task.id);
+        await refreshData(true);
+        setEditingTaskId((activeTaskId) => (activeTaskId === task.id ? null : activeTaskId));
+        setTaskEditDraft((draft) => (draft?.id === task.id ? null : draft));
+        setAllocationMessage(`"${task.title}" was deleted.`);
+      } catch (error) {
+        setAllocationMessage(error instanceof Error ? error.message : "Could not delete this task.");
+      }
+    });
   }
 
   async function claimTask(task: ManagedTask) {
@@ -750,7 +902,7 @@ export function App() {
     try {
       await api.taskAction(task.id, "submit");
       await refreshData(true);
-      setAllocationMessage(`"${task.title}" is under review.`);
+      setAllocationMessage(`Your approval for Task #${task.taskCode} was recorded.`);
     } catch (error) {
       setAllocationMessage(error instanceof Error ? error.message : "Could not submit this task.");
     }
@@ -873,6 +1025,48 @@ export function App() {
     }
   }
 
+  async function saveChatGroup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (currentUser?.role !== "superadmin" || !editingChatGroupId) return;
+    const name = chatGroupNameDraft.trim();
+    if (!name) {
+      setChatStatus("Enter a group name.");
+      return;
+    }
+    try {
+      const { channel } = await api.updateChatGroup(editingChatGroupId, name);
+      setChatChannels((channels) => channels.map((item) => item.id === channel.id ? channel : item));
+      setEditingChatGroupId("");
+      setChatGroupNameDraft("");
+      setChatStatus(`Renamed the group to ${name}.`);
+    } catch (error) {
+      setChatStatus(error instanceof Error ? error.message : "Could not edit this group.");
+    }
+  }
+
+  function deleteChatGroup(channel: ChatChannel) {
+    const canDelete = channel.isGroup && currentUser && (
+      currentUser.role === "superadmin" ||
+      (currentUser.role === "admin" && channel.department === currentUser.department)
+    );
+    if (!canDelete) return;
+    requestConfirmation(`Delete the group chat “${channel.name}” and all messages inside it?`, async () => {
+      try {
+        await api.deleteChatGroup(channel.id);
+        setChatChannels((channels) => channels.filter((item) => item.id !== channel.id));
+        setChatMessages((messages) => messages.filter((message) => message.channelId !== channel.id));
+        if (selectedChannelId === channel.id) setSelectedChannelId("");
+        if (editingChatGroupId === channel.id) {
+          setEditingChatGroupId("");
+          setChatGroupNameDraft("");
+        }
+        setChatStatus(`Deleted ${channel.name}.`);
+      } catch (error) {
+        setChatStatus(error instanceof Error ? error.message : "Could not delete this group.");
+      }
+    });
+  }
+
   async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentUser || !canManagePeople || !projectDraft.name.trim()) return;
@@ -909,15 +1103,25 @@ export function App() {
     }
   }
 
-  async function deleteProject(project: Project) {
-    if (!window.confirm(`Are you sure you want to delete project "${project.name}"? Its tasks will remain without a project.`)) return;
+  async function exportProjectSheet(project: Project) {
     try {
-      await api.deleteProject(project.id);
-      setProjectMessage(`${project.name} was deleted.`);
-      await refreshData(true);
+      await api.downloadProjectTaskTemplate(project.id, project.name);
+      setProjectMessage(`Editable task-sheet template downloaded for ${project.name}.`);
     } catch (error) {
-      setProjectMessage(error instanceof Error ? error.message : "Could not delete this project.");
+      setProjectMessage(error instanceof Error ? error.message : "Could not export this task sheet.");
     }
+  }
+
+  function deleteProject(project: Project) {
+    requestConfirmation(`Are you sure you want to delete project "${project.name}"? Its tasks will remain without a project.`, async () => {
+      try {
+        await api.deleteProject(project.id);
+        setProjectMessage(`${project.name} was deleted.`);
+        await refreshData(true);
+      } catch (error) {
+        setProjectMessage(error instanceof Error ? error.message : "Could not delete this project.");
+      }
+    });
   }
 
   function renderTaskCard(task: ManagedTask, view: "department" | "mine" = "department") {
@@ -932,6 +1136,7 @@ export function App() {
     const canSubmitForReview =
       currentUser?.role === "user" &&
       task.assigneeIds.includes(currentUser.id) &&
+      !task.workerApprovals.some((approval) => approval.id === currentUser.id) &&
       task.status !== "done" &&
       task.status !== "under_review";
     const canReviewTask = canEditTask && task.status === "under_review";
@@ -1069,7 +1274,7 @@ export function App() {
           ) : (
             <>
               <div>
-                <strong>{task.title}</strong>
+                <div className="task-title-line"><span className="task-code">Task #{task.taskCode}</span><strong>{task.title}</strong></div>
                 <p>{task.department} - Due {task.dueDate}</p>
                 {task.reviewComment ? <p className="review-note">Review: {task.reviewComment}</p> : null}
                 <div className="task-progress">
@@ -1119,7 +1324,7 @@ export function App() {
                   {canSubmitForReview ? (
                     <button type="button" className="task-action-button" onClick={() => submitTaskForReview(task)}>
                       <CheckCircle2 aria-hidden="true" size={16} />
-                      Finished
+                      Approve Work
                     </button>
                   ) : null}
                   {canEditTask ? (
@@ -1139,7 +1344,15 @@ export function App() {
         </div>
 
         {task.status === "under_review" && currentUser && task.assigneeIds.includes(currentUser.id) ? (
-          <p className="review-note">Submitted and waiting for admin review.</p>
+          <p className="review-note">All assigned workers approved. Waiting for admin approval.</p>
+        ) : null}
+
+        {task.status !== "done" && task.status !== "under_review" && task.workerApprovals.length ? (
+          <p className="worker-approval-note">
+            {currentUser && task.workerApprovals.some((approval) => approval.id === currentUser.id)
+              ? `You approved this task. Waiting for ${task.pendingApprovalNames.join(", ")}.`
+              : `${task.workerApprovals.map((approval) => approval.name).join(", ")} approved. Waiting for ${task.pendingApprovalNames.join(", ")}.`}
+          </p>
         ) : null}
 
         {task.status === "done" ? (
@@ -1178,29 +1391,36 @@ export function App() {
               <MessageSquare aria-hidden="true" size={16} />
               <strong>Task Chat</strong>
             </div>
-            {task.messages.length ? (
-              task.messages.slice(-3).map((message) => (
-                <p key={message.id}>
-                  <strong style={{ color: identityColor(message.authorId, currentUser?.id) }}>{message.authorName}</strong> {message.body}
-                  <span>{message.createdAt}</span>
-                </p>
-              ))
-            ) : (
-              <p>No clarifications yet.</p>
-            )}
-            <div className="chat-form">
-              <input
-                className={messageDrafts[task.id] ? "typing-input" : ""}
-                onChange={(event) =>
-                  setMessageDrafts((drafts) => ({ ...drafts, [task.id]: event.target.value }))
-                }
-                placeholder="Ask or reply"
-                value={messageDrafts[task.id] ?? ""}
-              />
-              <button type="button" className="icon-button" onClick={() => addTaskMessage(task)} aria-label="Send clarification">
-                <Plus aria-hidden="true" size={16} />
-              </button>
+            <div className="task-message-list" tabIndex={0} aria-label={`Comments for Task ${task.taskCode}`}>
+              {task.messages.length ? task.messages.map((message) => (
+                  <p key={message.id}>
+                    <strong style={{ color: identityColor(message.authorId, currentUser?.id) }}>{message.authorName}</strong> {message.body}
+                    <span>{message.createdAt}</span>
+                  </p>
+                )) : <p>No comments yet.</p>}
             </div>
+            {task.status !== "done" ? (
+              <>
+                <div className="emoji-picker" aria-label="Quick emojis">
+                  {quickEmojis.map((emoji) => (
+                    <button key={emoji} type="button" onClick={() => setMessageDrafts((drafts) => ({ ...drafts, [task.id]: `${drafts[task.id] ?? ""}${emoji}` }))} aria-label={`Add ${emoji}`}>{emoji}</button>
+                  ))}
+                </div>
+                <div className="chat-form">
+                  <input
+                    className={messageDrafts[task.id] ? "typing-input" : ""}
+                    onChange={(event) =>
+                      setMessageDrafts((drafts) => ({ ...drafts, [task.id]: event.target.value }))
+                    }
+                    placeholder="Add a comment"
+                    value={messageDrafts[task.id] ?? ""}
+                  />
+                  <button type="button" className="icon-button" onClick={() => addTaskMessage(task)} aria-label="Send comment">
+                    <Plus aria-hidden="true" size={16} />
+                  </button>
+                </div>
+              </>
+            ) : <small className="locked-note">Approved task: comments are read-only.</small>}
           </div>
 
           <div className="task-files">
@@ -1227,18 +1447,20 @@ export function App() {
             ) : (
               <p>No files added.</p>
             )}
-            <label className="file-upload">
-              <Paperclip aria-hidden="true" size={16} />
-              Add Files
-              <input
-                multiple
-                onChange={(event) => {
-                  addTaskFiles(task, event.target.files);
-                  event.target.value = "";
-                }}
-                type="file"
-              />
-            </label>
+            {task.status !== "done" ? (
+              <label className="file-upload">
+                <Paperclip aria-hidden="true" size={16} />
+                Add Files
+                <input
+                  multiple
+                  onChange={(event) => {
+                    addTaskFiles(task, event.target.files);
+                    event.target.value = "";
+                  }}
+                  type="file"
+                />
+              </label>
+            ) : <small className="locked-note">Approved task: documents are download-only.</small>}
           </div>
         </div>
       </article>
@@ -1255,7 +1477,14 @@ export function App() {
   }
 
   if (!currentUser) {
-    return <LoginPage error={loginError} onLogin={handleLogin} />;
+    return (
+      <LoginPage
+        darkMode={darkMode}
+        error={loginError}
+        onLogin={handleLogin}
+        onToggleTheme={toggleTheme}
+      />
+    );
   }
 
   return (
@@ -1288,6 +1517,15 @@ export function App() {
           </button>
           <button
             type="button"
+            className={`sidebar-nav-button ${activeView === "todos" ? "active" : ""}`}
+            onClick={() => setActiveView("todos")}
+          >
+            <ListTodo aria-hidden="true" size={17} />
+            My TODOs
+            <span>{openTodos.length}</span>
+          </button>
+          <button
+            type="button"
             className={`sidebar-nav-button ${activeView === "projects" ? "active" : ""}`}
             onClick={() => setActiveView("projects")}
           >
@@ -1307,7 +1545,7 @@ export function App() {
           <button
             type="button"
             className={`sidebar-nav-button ${activeView === "chat" ? "active" : ""}`}
-            onClick={() => setActiveView("chat")}
+            onClick={() => void openDepartmentChat()}
           >
             <MessageSquare aria-hidden="true" size={17} />
             Department Chat
@@ -1354,6 +1592,16 @@ export function App() {
             </div>
           </div>
           <div className="topbar-actions">
+            <button
+              aria-label={`Switch to ${darkMode ? "light" : "dark"} mode`}
+              aria-pressed={darkMode}
+              className="theme-toggle"
+              onClick={toggleTheme}
+              type="button"
+            >
+              {darkMode ? <Sun aria-hidden="true" size={18} /> : <Moon aria-hidden="true" size={18} />}
+              <span>{darkMode ? "Light mode" : "Dark mode"}</span>
+            </button>
             <div className="notification-center">
               <button
                 type="button"
@@ -1747,7 +1995,88 @@ export function App() {
               })}
             </div>
           </section>
-        </section> : activeView === "projects" ? (
+        </section> : activeView === "todos" ? (
+          <section className="panel page-panel todo-page" id="todos-page">
+            <div className="panel-header">
+              <div><p>Personal checklist for {currentUser.name}</p><h2>My TODO List</h2></div>
+              <strong className="result-count">{openTodos.length} open</strong>
+            </div>
+
+            <div className="todo-summary">
+              <div>
+                <span>{todoProgress}% complete</span>
+                <small>{completedTodos.length} of {todos.length} items finished</small>
+              </div>
+              <div className="task-progress" aria-label={`${todoProgress}% of TODO items complete`}>
+                <span style={{ width: `${todoProgress}%` }} />
+              </div>
+            </div>
+
+            <form className="todo-create-form" onSubmit={createTodo}>
+              <input
+                aria-label="TODO item"
+                maxLength={240}
+                onChange={(event) => setTodoDraft((draft) => ({ ...draft, title: event.target.value }))}
+                placeholder="What needs to be done?"
+                value={todoDraft.title}
+              />
+              <select
+                aria-label="Link TODO to a task"
+                onChange={(event) => setTodoDraft((draft) => ({ ...draft, taskId: event.target.value }))}
+                value={todoDraft.taskId}
+              >
+                <option value="">No linked task</option>
+                {todoLinkableTasks.map((task) => (
+                  <option key={task.id} value={task.id}>{task.taskCode} — {task.title}</option>
+                ))}
+              </select>
+              <button className="primary-button" type="submit"><Plus aria-hidden="true" size={17} />Add TODO</button>
+            </form>
+            {todoMessage ? <p className="success-message">{todoMessage}</p> : null}
+
+            <div className="todo-toolbar" aria-label="Filter TODO items">
+              {(["all", "open", "completed"] as const).map((filter) => (
+                <button
+                  className={todoFilter === filter ? "active" : ""}
+                  key={filter}
+                  onClick={() => setTodoFilter(filter)}
+                  type="button"
+                >
+                  {filter === "all" ? `All (${todos.length})` : filter === "open" ? `Open (${openTodos.length})` : `Completed (${completedTodos.length})`}
+                </button>
+              ))}
+            </div>
+
+            <div className="todo-list">
+              {filteredTodos.length ? filteredTodos.map((todo) => (
+                <article className={`todo-item ${todo.completed ? "completed" : ""}`} key={todo.id}>
+                  <button
+                    aria-label={todo.completed ? `Reopen ${todo.title}` : `Complete ${todo.title}`}
+                    aria-pressed={todo.completed}
+                    className="todo-check"
+                    onClick={() => void toggleTodo(todo)}
+                    type="button"
+                  >
+                    {todo.completed ? <CheckCircle2 aria-hidden="true" size={21} /> : <span />}
+                  </button>
+                  <div>
+                    <strong>{todo.title}</strong>
+                    <small>{todo.completedAt ? `Completed ${todo.completedAt}` : `Added ${todo.createdAt}`}</small>
+                    {todo.taskId ? (
+                      <button className="todo-task-link" onClick={() => setActiveView("tasks")} type="button">
+                        <ClipboardList aria-hidden="true" size={14} />
+                        {todo.taskCode ?? "Task"}: {todo.taskTitle ?? "Linked task"}
+                      </button>
+                    ) : null}
+                  </div>
+                  <button className="icon-button danger" onClick={() => deleteTodo(todo)} type="button" aria-label={`Delete ${todo.title}`}>
+                    <Trash2 aria-hidden="true" size={16} />
+                  </button>
+                </article>
+              )) : <p className="empty-state">No TODO items match this filter.</p>}
+            </div>
+          </section>
+        ) : activeView === "projects" ? (
           <section className="panel page-panel" id="projects-page">
             <div className="panel-header">
               <div><p>Project teams and task-sheet intake</p><h2>Projects</h2></div>
@@ -1791,6 +2120,7 @@ export function App() {
                         </label>
                         <div className="project-actions">
                           <button className="ghost-button" type="button" onClick={() => saveProjectMembers(project)}><Save aria-hidden="true" size={16} />Save Members</button>
+                          <button className="ghost-button" type="button" onClick={() => exportProjectSheet(project)}><Download aria-hidden="true" size={16} />Export Task Sheet</button>
                           <label className="file-upload"><Upload aria-hidden="true" size={16} />Import Task Sheet
                             <input accept=".xlsx,.csv" type="file" onChange={(event) => { void importProjectSheet(project, event.target.files?.[0]); event.target.value = ""; }} />
                           </label>
@@ -1925,16 +2255,60 @@ export function App() {
                 <h2>{selectedChatChannel?.name ?? "Department Chat"}</h2>
               </div>
               {canManagePeople ? (
-                <button
-                  className="ghost-button"
-                  onClick={() => setShowGroupForm((visible) => !visible)}
-                  type="button"
-                >
-                  <Plus aria-hidden="true" size={17} />
-                  Create Group
-                </button>
+                <div className="chat-management-actions">
+                  {selectedChatChannel?.isGroup && currentUser.role === "superadmin" ? (
+                    <button
+                      className="icon-button"
+                      onClick={() => {
+                        setEditingChatGroupId(selectedChatChannel.id);
+                        setChatGroupNameDraft(selectedChatChannel.name);
+                      }}
+                      type="button"
+                      aria-label={`Edit ${selectedChatChannel.name}`}
+                      title="Edit group name"
+                    >
+                      <Edit3 aria-hidden="true" size={16} />
+                    </button>
+                  ) : null}
+                  {selectedChatChannel && canDeleteSelectedChatGroup ? (
+                    <button
+                      className="icon-button danger"
+                      onClick={() => deleteChatGroup(selectedChatChannel)}
+                      type="button"
+                      aria-label={`Delete ${selectedChatChannel.name}`}
+                      title="Delete group chat"
+                    >
+                      <Trash2 aria-hidden="true" size={16} />
+                    </button>
+                  ) : null}
+                  <button
+                    className="ghost-button"
+                    onClick={() => setShowGroupForm((visible) => !visible)}
+                    type="button"
+                  >
+                    <Plus aria-hidden="true" size={17} />
+                    Create Group
+                  </button>
+                </div>
               ) : null}
             </div>
+
+            {selectedChatChannel?.isGroup && editingChatGroupId === selectedChatChannel.id && currentUser.role === "superadmin" ? (
+              <form className="chat-edit-form" onSubmit={saveChatGroup}>
+                <input
+                  autoFocus
+                  maxLength={80}
+                  onChange={(event) => setChatGroupNameDraft(event.target.value)}
+                  value={chatGroupNameDraft}
+                  aria-label="Group chat name"
+                />
+                <button className="primary-button" type="submit"><Save aria-hidden="true" size={16} />Save Name</button>
+                <button className="ghost-button" onClick={() => {
+                  setEditingChatGroupId("");
+                  setChatGroupNameDraft("");
+                }} type="button">Cancel</button>
+              </form>
+            ) : null}
 
             {showGroupForm && canManagePeople ? (
               <form className="chat-group-form" onSubmit={createChatGroup}>
@@ -2001,6 +2375,11 @@ export function App() {
                   )}
                 </div>
                 <form className="chat-compose" onSubmit={sendDepartmentMessage}>
+                  <div className="emoji-picker department-emojis" aria-label="Quick emojis">
+                    {quickEmojis.map((emoji) => (
+                      <button key={emoji} type="button" onClick={() => setChatDraft((draft) => `${draft}${emoji}`)} aria-label={`Add ${emoji}`}>{emoji}</button>
+                    ))}
+                  </div>
                   <input
                     className={chatDraft ? "typing-input" : ""}
                     disabled={!selectedChannelId}
@@ -2051,6 +2430,23 @@ export function App() {
           </section>
         )}
       </section>
+      {confirmation ? (
+        <div className="confirmation-backdrop" role="presentation" onMouseDown={() => setConfirmation(null)}>
+          <section className="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-confirmation-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="confirmation-icon"><AlertTriangle aria-hidden="true" size={24} /></div>
+            <h2 id="delete-confirmation-title">Confirm deletion</h2>
+            <p>{confirmation.message}</p>
+            <div className="confirmation-actions">
+              <button className="ghost-button" type="button" onClick={() => setConfirmation(null)}>Cancel</button>
+              <button className="danger-button" type="button" onClick={() => {
+                const action = confirmation.onConfirm;
+                setConfirmation(null);
+                void action();
+              }}>Yes, delete</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

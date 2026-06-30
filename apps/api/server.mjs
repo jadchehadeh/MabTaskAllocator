@@ -59,6 +59,7 @@ db.exec(`
     assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
     task_type TEXT NOT NULL DEFAULT 'Technical',
+    task_code TEXT,
     due_date TEXT NOT NULL,
     progress INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
     review_comment TEXT,
@@ -71,6 +72,16 @@ db.exec(`
     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     PRIMARY KEY (task_id, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS task_worker_approvals (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    approved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (task_id, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS task_code_sequences (
+    prefix TEXT PRIMARY KEY,
+    next_number INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS task_messages (
     id TEXT PRIMARY KEY,
@@ -97,11 +108,22 @@ db.exec(`
     is_read INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS todos (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    is_completed INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
   CREATE TABLE IF NOT EXISTS chat_groups (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     department TEXT NOT NULL,
     created_by_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS chat_messages (
@@ -118,6 +140,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_task_assignees_user ON task_assignees(user_id, task_id);
   CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, project_id);
   CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_todos_user ON todos(user_id, is_completed, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_chat_groups_department ON chat_groups(department, created_at);
   CREATE INDEX IF NOT EXISTS idx_chat_messages_department ON chat_messages(department, created_at DESC);
 `);
@@ -135,7 +158,10 @@ ensureColumn("task_files", "mime_type", "TEXT");
 ensureColumn("task_files", "size", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("tasks", "project_id", "TEXT");
 ensureColumn("tasks", "task_type", "TEXT NOT NULL DEFAULT 'Technical'");
+ensureColumn("tasks", "task_code", "TEXT");
+ensureColumn("chat_groups", "task_id", "TEXT");
 db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id)");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_groups_task ON chat_groups(task_id) WHERE task_id IS NOT NULL");
 db.exec("UPDATE sessions SET last_active_at = COALESCE(last_active_at, created_at)");
 db.exec(`
   INSERT OR IGNORE INTO task_assignees (task_id, user_id)
@@ -196,6 +222,24 @@ function getTask(taskId) {
   `).get(taskId);
 }
 
+function todosFor(userId) {
+  return db.prepare(`
+    SELECT todos.*, tasks.task_code, tasks.title AS task_title
+    FROM todos LEFT JOIN tasks ON tasks.id = todos.task_id
+    WHERE todos.user_id = ?
+    ORDER BY todos.is_completed ASC, todos.created_at DESC
+  `).all(userId).map((todo) => ({
+    id: todo.id,
+    title: todo.title,
+    completed: Boolean(todo.is_completed),
+    taskId: todo.task_id ?? undefined,
+    taskCode: todo.task_code ?? undefined,
+    taskTitle: todo.task_title ?? undefined,
+    createdAt: formatDate(todo.created_at),
+    completedAt: formatDate(todo.completed_at)
+  }));
+}
+
 function serializeTask(row) {
   const messages = db.prepare(`
     SELECT id, author_id, author_name, body, created_at FROM task_messages
@@ -212,6 +256,12 @@ function serializeTask(row) {
     JOIN users ON users.id = task_assignees.user_id
     WHERE task_assignees.task_id = ? ORDER BY users.name
   `).all(row.id);
+  const approvals = db.prepare(`
+    SELECT users.id, users.name, task_worker_approvals.approved_at
+    FROM task_worker_approvals JOIN users ON users.id = task_worker_approvals.user_id
+    WHERE task_worker_approvals.task_id = ? ORDER BY task_worker_approvals.approved_at
+  `).all(row.id);
+  const approvedIds = approvals.map((approval) => approval.id);
   const files = db.prepare(`
     SELECT id, name, uploaded_by, uploaded_at, mime_type, size FROM task_files
     WHERE task_id = ? ORDER BY uploaded_at ASC
@@ -226,6 +276,7 @@ function serializeTask(row) {
 
   return {
     id: row.id,
+    taskCode: row.task_code,
     title: row.title,
     department: row.department,
     priority: row.priority,
@@ -234,6 +285,8 @@ function serializeTask(row) {
     assigneeIds: assignees.map((assignee) => assignee.id),
     candidateName: assignees.map((assignee) => assignee.name).join(", ") || "Unassigned",
     candidateNames: assignees.map((assignee) => assignee.name),
+    workerApprovals: approvals.map((approval) => ({ id: approval.id, name: approval.name, approvedAt: isoDateTime(approval.approved_at) })),
+    pendingApprovalNames: assignees.filter((assignee) => !approvedIds.includes(assignee.id)).map((assignee) => assignee.name),
     projectId: row.project_id ?? undefined,
     projectName: row.project_name ?? undefined,
     taskType: row.task_type ?? "Technical",
@@ -283,6 +336,51 @@ function normalizeTaskType(value) {
   return taskTypes.find((type) => type.toLowerCase() === requested) ?? "Technical";
 }
 
+function codeInitials(value, fallback) {
+  const initials = String(value ?? "").match(/[A-Za-z0-9]+/g)?.map((word) => word[0]).join("").toUpperCase();
+  return (initials || fallback).slice(0, 5);
+}
+
+function generateTaskCode(projectName, department) {
+  const projectCode = codeInitials(projectName, "GEN");
+  const departmentCode = String(department).startsWith("Electrical") ? "E"
+    : String(department).startsWith("Mechanical") ? "M"
+      : String(department).startsWith("Document") ? "D"
+        : codeInitials(department, "D").slice(0, 2);
+  const prefix = `${projectCode}${departmentCode}`;
+  const sequence = db.prepare("SELECT next_number FROM task_code_sequences WHERE prefix = ?").get(prefix);
+  let number;
+  if (sequence) {
+    number = sequence.next_number;
+    db.prepare("UPDATE task_code_sequences SET next_number = ? WHERE prefix = ?").run(number + 1, prefix);
+  } else {
+    const existing = db.prepare("SELECT task_code FROM tasks WHERE task_code LIKE ? ORDER BY length(task_code) DESC, task_code DESC LIMIT 1")
+      .get(`${prefix}-%`);
+    number = existing ? Number(existing.task_code.split("-").pop()) + 1 : 1;
+    db.prepare("INSERT INTO task_code_sequences (prefix, next_number) VALUES (?, ?)").run(prefix, number + 1);
+  }
+  return `${prefix}-${String(number).padStart(2, "0")}`;
+}
+
+function ensureTaskChatGroup(taskId) {
+  const task = db.prepare("SELECT id, task_code, department FROM tasks WHERE id = ?").get(taskId);
+  if (!task || taskAssigneeIds(taskId).length < 2) return;
+  const existing = db.prepare("SELECT id FROM chat_groups WHERE task_id = ?").get(taskId);
+  if (existing) {
+    db.prepare("UPDATE chat_groups SET name = ? WHERE id = ?").run(`Task #${task.task_code}`, existing.id);
+    return;
+  }
+  db.prepare("INSERT INTO chat_groups (id, name, department, created_by_id, task_id) VALUES (?, ?, ?, NULL, ?)")
+    .run(randomUUID(), `Task #${task.task_code}`, task.department, taskId);
+}
+
+function deleteTaskChatGroup(taskId) {
+  const group = db.prepare("SELECT id FROM chat_groups WHERE task_id = ?").get(taskId);
+  if (!group) return;
+  db.prepare("DELETE FROM chat_messages WHERE channel_id = ?").run(`group:${group.id}`);
+  db.prepare("DELETE FROM chat_groups WHERE id = ?").run(group.id);
+}
+
 function taskAssigneeIds(taskId) {
   return db.prepare("SELECT user_id FROM task_assignees WHERE task_id = ?").all(taskId).map((item) => item.user_id);
 }
@@ -293,6 +391,15 @@ function setTaskAssignees(taskId, assigneeIds) {
     db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(taskId, userId);
   }
   db.prepare("UPDATE tasks SET assignee_id = ? WHERE id = ?").run(assigneeIds[0] ?? null, taskId);
+  if (assigneeIds.length) {
+    db.prepare(`
+      DELETE FROM task_worker_approvals WHERE task_id = ?
+        AND user_id NOT IN (${assigneeIds.map(() => "?").join(",")})
+    `).run(taskId, ...assigneeIds);
+  } else {
+    db.prepare("DELETE FROM task_worker_approvals WHERE task_id = ?").run(taskId);
+  }
+  ensureTaskChatGroup(taskId);
 }
 
 function validTaskAssignees(ids, department, projectId = null) {
@@ -395,13 +502,15 @@ function chatDataFor(actor) {
         ORDER BY department
       `).all().map((item) => item.department)
     : [actor.department];
-  const groups = departments.length
+  const departmentGroups = departments.length
     ? db.prepare(`
-        SELECT id, name, department FROM chat_groups
+        SELECT id, name, department, task_id FROM chat_groups
         WHERE department IN (${departments.map(() => "?").join(",")})
         ORDER BY created_at ASC
       `).all(...departments)
     : [];
+  const groups = departmentGroups.filter((group) =>
+    !group.task_id || actor.role === "superadmin" || actor.role === "admin" || taskAssigneeIds(group.task_id).includes(actor.id));
   const channels = [
     ...departments.map((department) => ({
       id: `department:${department}`,
@@ -413,21 +522,23 @@ function chatDataFor(actor) {
       id: `group:${group.id}`,
       name: group.name,
       department: group.department,
-      isGroup: true
+      isGroup: true,
+      taskId: group.task_id ?? undefined
     }))
   ];
-  const messages = departments.length
+  const channelIds = channels.map((channel) => channel.id);
+  const messages = channelIds.length
     ? db.prepare(`
         SELECT * FROM (
           SELECT id, channel_id, author_id, author_name, body, created_at
           FROM chat_messages
-          WHERE department IN (${departments.map(() => "?").join(",")})
+          WHERE channel_id IN (${channelIds.map(() => "?").join(",")})
           ORDER BY created_at DESC LIMIT 300
         ) ORDER BY created_at ASC
-      `).all(...departments).map((message) => ({
+      `).all(...channelIds).map((message) => ({
         id: message.id,
         channelId: message.channel_id,
-        authorId: message.author_id,
+        authorId: message.author_id ?? "deleted-user",
         authorName: message.author_name,
         body: message.body,
         createdAt: formatDate(message.created_at)
@@ -545,10 +656,22 @@ function saveTaskFiles(taskId, actor, files) {
   }
 }
 
+for (const task of db.prepare(`
+  SELECT tasks.id, tasks.department, projects.name AS project_name
+  FROM tasks LEFT JOIN projects ON projects.id = tasks.project_id
+  WHERE tasks.task_code IS NULL OR tasks.task_code = ''
+  ORDER BY tasks.created_at
+`).all()) {
+  db.prepare("UPDATE tasks SET task_code = ? WHERE id = ?")
+    .run(generateTaskCode(task.project_name, task.department), task.id);
+}
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_code ON tasks(task_code)");
+for (const task of db.prepare("SELECT id FROM tasks").all()) ensureTaskChatGroup(task.id);
+
 async function buildProductivityReport(user, month = "") {
   const monthFilter = /^\d{4}-\d{2}$/.test(month) ? month : "";
   const rows = db.prepare(`
-    SELECT DISTINCT tasks.id, tasks.title, tasks.department, tasks.priority, tasks.status,
+    SELECT DISTINCT tasks.id, tasks.task_code, tasks.title, tasks.department, tasks.priority, tasks.status,
       tasks.due_date, tasks.progress, tasks.created_at, tasks.updated_at, tasks.completed_at,
       tasks.task_type, projects.name AS project_name
     FROM tasks
@@ -632,6 +755,7 @@ async function buildProductivityReport(user, month = "") {
   summary.columns = [{ width: 24 }, { width: 28 }, { width: 4 }, { width: 4 }];
 
   tasks.columns = [
+    { header: "Task ID", key: "taskCode", width: 16 },
     { header: "Task", key: "title", width: 38 },
     { header: "Project", key: "project", width: 24 },
     { header: "Task Type", key: "taskType", width: 18 },
@@ -653,6 +777,7 @@ async function buildProductivityReport(user, month = "") {
   for (const task of rows) {
     const completedDate = task.completed_at ? new Date(`${task.completed_at.replace(" ", "T")}Z`) : null;
     tasks.addRow({
+      taskCode: task.task_code,
       title: task.title,
       project: task.project_name ?? "No project",
       taskType: task.task_type ?? "Technical",
@@ -674,10 +799,81 @@ async function buildProductivityReport(user, month = "") {
   tasks.getColumn("due").numFmt = "yyyy-mm-dd";
   tasks.getColumn("completed").numFmt = "yyyy-mm-dd hh:mm";
   tasks.getColumn("cycleTime").numFmt = "0.0";
-  tasks.autoFilter = { from: "A1", to: "L1" };
+  tasks.autoFilter = { from: "A1", to: "M1" };
   tasks.eachRow((row, rowNumber) => {
     if (rowNumber > 1 && rowNumber % 2 === 0) row.eachCell((cell) => { cell.fill = paleFill; });
   });
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+async function buildProjectTaskTemplate(project) {
+  const members = db.prepare(`
+    SELECT users.name, users.username FROM project_members
+    JOIN users ON users.id = project_members.user_id
+    WHERE project_members.project_id = ? ORDER BY users.name
+  `).all(project.id);
+  const usernames = members.map((member) => member.username);
+  const firstUser = usernames[0] ?? "user@mabunited.com";
+  const secondUser = usernames[1] ?? firstUser;
+  const due = (days) => {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() + days);
+    return date;
+  };
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "MAB Task Allocator";
+  workbook.created = new Date();
+  const tasks = workbook.addWorksheet("Tasks", { views: [{ state: "frozen", ySplit: 1, showGridLines: false }] });
+  const instructions = workbook.addWorksheet("Instructions", { views: [{ showGridLines: false }] });
+  const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1178B8" } };
+  const paleFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEEF8FF" } };
+  tasks.columns = [
+    { header: "Task", key: "task", width: 42 },
+    { header: "Priority", key: "priority", width: 14 },
+    { header: "Due Date", key: "dueDate", width: 16 },
+    { header: "Progress", key: "progress", width: 14 },
+    { header: "Task Type", key: "taskType", width: 20 },
+    { header: "Assignees", key: "assignees", width: 48 }
+  ];
+  tasks.addRows([
+    { task: "Prepare technical submittal package", priority: "high", dueDate: due(7), progress: 0, taskType: "Technical", assignees: firstUser },
+    { task: "Review quantity takeoff and measurements", priority: "medium", dueDate: due(12), progress: 25, taskType: "QS", assignees: secondUser },
+    { task: "Coordinate BIM model and shop drawings", priority: "urgent", dueDate: due(18), progress: 0, taskType: "BIM", assignees: `${firstUser};${secondUser}` }
+  ]);
+  tasks.getRow(1).height = 28;
+  tasks.getRow(1).eachCell((cell) => {
+    cell.fill = headerFill;
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.alignment = { vertical: "middle" };
+  });
+  tasks.getColumn("dueDate").numFmt = "yyyy-mm-dd";
+  tasks.getColumn("progress").numFmt = "0";
+  tasks.autoFilter = { from: "A1", to: "F1" };
+  for (let row = 2; row <= 250; row += 1) {
+    tasks.getCell(`B${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"low,medium,high,urgent"'] };
+    tasks.getCell(`D${row}`).dataValidation = { type: "whole", operator: "between", allowBlank: true, formulae: [0, 100] };
+    tasks.getCell(`E${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"Technical,QS,Shop Drawings,BIM,Variation"'] };
+  }
+  tasks.eachRow((row, rowNumber) => {
+    if (rowNumber > 1 && rowNumber % 2 === 0) row.eachCell((cell) => { cell.fill = paleFill; });
+  });
+
+  instructions.mergeCells("A1:F1");
+  instructions.getCell("A1").value = `${project.name} - Project Task Sheet`;
+  instructions.getCell("A1").fill = headerFill;
+  instructions.getCell("A1").font = { bold: true, color: { argb: "FFFFFFFF" }, size: 17 };
+  instructions.getRow(1).height = 32;
+  instructions.getCell("A3").value = "Department";
+  instructions.getCell("B3").value = project.department;
+  instructions.getCell("A4").value = "How to use";
+  instructions.getCell("B4").value = "Edit or replace the dummy rows on the Tasks sheet, keep the header names unchanged, then import the completed workbook into this project.";
+  instructions.getCell("A6").value = "Assignees";
+  instructions.getCell("B6").value = "Use a project member name or username. Separate multiple assignees with a semicolon (;).";
+  instructions.getCell("A8").value = "Project members";
+  instructions.getCell("B8").value = members.map((member) => `${member.name} (${member.username})`).join("; ") || "Add project members before importing assignments.";
+  instructions.getColumn("A").width = 22;
+  instructions.getColumn("B").width = 90;
+  instructions.getColumn("B").alignment = { wrapText: true, vertical: "top" };
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
@@ -742,6 +938,10 @@ const server = createServer(async (request, response) => {
       return send(response, 200, { ok: true });
     }
 
+    if (request.method === "GET" && path === "/api/chat") {
+      return send(response, 200, chatDataFor(actor));
+    }
+
     const fileDownloadMatch = path.match(/^\/api\/files\/([^/]+)\/download$/);
     if (request.method === "GET" && fileDownloadMatch) {
       const file = db.prepare(`
@@ -795,7 +995,62 @@ const server = createServer(async (request, response) => {
         isRead: Boolean(item.is_read),
         createdAt: formatDate(item.created_at)
       }));
-      return send(response, 200, { currentUser: actor, users, tasks, projects: projectsFor(actor), notifications, ...chatDataFor(actor) });
+      return send(response, 200, {
+        currentUser: actor,
+        users,
+        tasks,
+        projects: projectsFor(actor),
+        notifications,
+        todos: todosFor(actor.id),
+        ...chatDataFor(actor)
+      });
+    }
+
+    if (request.method === "POST" && path === "/api/todos") {
+      const title = String(body.title ?? "").trim().slice(0, 240);
+      const taskId = String(body.taskId ?? "").trim() || null;
+      if (!title) throw new Error("TODO title is required.");
+      if (taskId) {
+        const task = getTask(taskId);
+        if (!task) return send(response, 404, { message: "Linked task not found." });
+        if (!canView(actor, task)) return send(response, 403, { message: "You cannot link a TODO to this task." });
+      }
+      const id = randomUUID();
+      db.prepare("INSERT INTO todos (id, user_id, task_id, title) VALUES (?, ?, ?, ?)")
+        .run(id, actor.id, taskId, title);
+      touchSession(request);
+      return send(response, 201, { todo: todosFor(actor.id).find((todo) => todo.id === id) });
+    }
+
+    const todoMatch = path.match(/^\/api\/todos\/([^/]+)$/);
+    if (todoMatch && request.method === "PUT") {
+      const existing = db.prepare("SELECT * FROM todos WHERE id = ? AND user_id = ?").get(todoMatch[1], actor.id);
+      if (!existing) return send(response, 404, { message: "TODO item not found." });
+      const title = String(body.title ?? existing.title).trim().slice(0, 240);
+      const completed = Boolean(body.completed);
+      const taskId = body.taskId === undefined ? existing.task_id : String(body.taskId ?? "").trim() || null;
+      if (!title) throw new Error("TODO title is required.");
+      if (taskId) {
+        const task = getTask(taskId);
+        if (!task) return send(response, 404, { message: "Linked task not found." });
+        if (!canView(actor, task)) return send(response, 403, { message: "You cannot link a TODO to this task." });
+      }
+      db.prepare(`
+        UPDATE todos
+        SET title = ?, task_id = ?, is_completed = ?,
+            completed_at = CASE WHEN ? = 1 THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ?
+      `).run(title, taskId, completed ? 1 : 0, completed ? 1 : 0, existing.id, actor.id);
+      touchSession(request);
+      return send(response, 200, { todo: todosFor(actor.id).find((todo) => todo.id === existing.id) });
+    }
+
+    if (todoMatch && request.method === "DELETE") {
+      const result = db.prepare("DELETE FROM todos WHERE id = ? AND user_id = ?").run(todoMatch[1], actor.id);
+      if (!result.changes) return send(response, 404, { message: "TODO item not found." });
+      touchSession(request);
+      return send(response, 200, { ok: true });
     }
 
     if (request.method === "POST" && path === "/api/users") {
@@ -873,6 +1128,19 @@ const server = createServer(async (request, response) => {
       return send(response, 201, { project: projectsFor(actor).find((project) => project.id === id) });
     }
 
+    const projectTemplateMatch = path.match(/^\/api\/projects\/([^/]+)\/task-sheet-template$/);
+    if (projectTemplateMatch && request.method === "GET") {
+      requireManager(actor);
+      const project = db.prepare("SELECT * FROM projects WHERE id = ?").get(projectTemplateMatch[1]);
+      if (!project) return send(response, 404, { message: "Project not found." });
+      if (actor.role === "admin" && project.department !== actor.department) {
+        return send(response, 403, { message: "You cannot export this project task sheet." });
+      }
+      const data = await buildProjectTaskTemplate(project);
+      const slug = project.name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "project";
+      return sendBinary(response, 200, data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", `${slug}-task-sheet.xlsx`);
+    }
+
     const projectImportMatch = path.match(/^\/api\/projects\/([^/]+)\/import$/);
     if (projectImportMatch && request.method === "POST") {
       requireManager(actor);
@@ -895,11 +1163,12 @@ const server = createServer(async (request, response) => {
               value.toLowerCase() === member.username.toLowerCase() || value.toLowerCase() === member.name.toLowerCase()))
             .map((member) => member.id);
           const id = randomUUID();
+          const taskCode = generateTaskCode(project.name, project.department);
           const status = assigneeIds.length ? (imported.progress > 0 ? "in_progress" : "assigned") : "new";
           db.prepare(`
-            INSERT INTO tasks (id, title, department, priority, status, assignee_id, project_id, task_type, due_date, progress, created_by_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `).run(id, imported.title, project.department, imported.priority, status, assigneeIds[0] ?? null,
+            INSERT INTO tasks (id, task_code, title, department, priority, status, assignee_id, project_id, task_type, due_date, progress, created_by_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(id, taskCode, imported.title, project.department, imported.priority, status, assigneeIds[0] ?? null,
             project.id, imported.taskType, imported.dueDate, assigneeIds.length ? imported.progress : 0, actor.id);
           for (const userId of assigneeIds) {
             db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(id, userId);
@@ -912,6 +1181,7 @@ const server = createServer(async (request, response) => {
         throw error;
       }
       for (const id of createdIds) {
+        ensureTaskChatGroup(id);
         for (const userId of taskAssigneeIds(id)) notify(userId, "assignment", "Imported project task", `A task was imported into ${project.name}.`, id);
       }
       touchSession(request);
@@ -984,11 +1254,12 @@ const server = createServer(async (request, response) => {
         projectId: project?.id ?? null,
         taskType: normalizeTaskType(body.taskType)
       };
+      task.taskCode = generateTaskCode(project?.name, department);
       if (!task.title) throw new Error("Task title is required.");
       db.prepare(`
-        INSERT INTO tasks (id, title, department, priority, status, assignee_id, project_id, task_type, due_date, progress, created_by_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(task.id, task.title, task.department, task.priority, task.status, task.assigneeIds[0] ?? null,
+        INSERT INTO tasks (id, task_code, title, department, priority, status, assignee_id, project_id, task_type, due_date, progress, created_by_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(task.id, task.taskCode, task.title, task.department, task.priority, task.status, task.assigneeIds[0] ?? null,
         task.projectId, task.taskType, task.dueDate, task.progress, actor.id);
       setTaskAssignees(task.id, task.assigneeIds);
       try {
@@ -1021,6 +1292,7 @@ const server = createServer(async (request, response) => {
         project?.id ?? null, normalizeTaskType(body.taskType), body.dueDate,
         Math.max(0, Math.min(100, Number(body.progress) || 0)), existing.id);
       setTaskAssignees(existing.id, assignees.map((assignee) => assignee.id));
+      if (body.status === "done") deleteTaskChatGroup(existing.id);
       for (const assignee of assignees.filter((item) => !previousIds.includes(item.id))) {
         notify(assignee.id, "assignment", "Task allocated", `You were assigned: ${body.title}`, existing.id);
       }
@@ -1032,6 +1304,7 @@ const server = createServer(async (request, response) => {
       if (!task) return send(response, 404, { message: "Task not found." });
       if (!canManage(actor, task)) return send(response, 403, { message: "You cannot delete this task." });
       const files = db.prepare("SELECT storage_name FROM task_files WHERE task_id = ?").all(task.id);
+      deleteTaskChatGroup(task.id);
       db.prepare("DELETE FROM tasks WHERE id = ?").run(task.id);
       for (const file of files) {
         if (!file.storage_name) continue;
@@ -1055,22 +1328,33 @@ const server = createServer(async (request, response) => {
       }
       if (action === "submit") {
         if (actor.role !== "user" || !assignedUserIds.includes(actor.id) || ["done", "under_review"].includes(task.status)) return send(response, 403, { message: "This task cannot be submitted." });
-        db.prepare("UPDATE tasks SET status = 'under_review', progress = 100, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
-        notifyTaskAudience(task, actor.id, "Task ready for review", `${actor.name} submitted: ${task.title}`);
+        db.prepare("INSERT OR IGNORE INTO task_worker_approvals (task_id, user_id) VALUES (?, ?)").run(task.id, actor.id);
+        const approvedIds = db.prepare("SELECT user_id FROM task_worker_approvals WHERE task_id = ?").all(task.id).map((item) => item.user_id);
+        const remainingIds = assignedUserIds.filter((userId) => !approvedIds.includes(userId));
+        if (remainingIds.length) {
+          db.prepare("UPDATE tasks SET status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
+          for (const userId of remainingIds) notify(userId, "approval", "Worker approval needed", `${actor.name} approved ${task.task_code}. Your approval is still required.`, task.id);
+        } else {
+          db.prepare("UPDATE tasks SET status = 'under_review', progress = 100, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
+          notifyTaskAudience(task, actor.id, "Task ready for admin review", `All workers approved ${task.task_code}: ${task.title}`);
+        }
       }
       if (action === "approve") {
         if (!canManage(actor, task) || task.status !== "under_review") return send(response, 403, { message: "This task cannot be approved." });
         db.prepare("UPDATE tasks SET status = 'done', progress = 100, review_comment = 'Approved.', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
+        deleteTaskChatGroup(task.id);
         for (const userId of assignedUserIds) notify(userId, "approval", "Task approved", `${actor.name} approved: ${task.title}`, task.id);
       }
       if (action === "reopen") {
         const comment = String(body.comment ?? "").trim();
         if (!canManage(actor, task) || task.status !== "under_review" || !comment) return send(response, 403, { message: "A review comment is required." });
         db.prepare("UPDATE tasks SET status = 'in_progress', progress = MIN(progress, 90), review_comment = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(comment, task.id);
+        db.prepare("DELETE FROM task_worker_approvals WHERE task_id = ?").run(task.id);
         for (const userId of assignedUserIds) notify(userId, "review", "Task reopened", `${actor.name}: ${comment}`, task.id);
       }
       if (action === "messages") {
         if (!canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
+        if (task.status === "done") return send(response, 409, { message: "Approved tasks are read-only. Existing comments remain available." });
         const message = String(body.body ?? "").trim();
         if (!message) throw new Error("Message cannot be empty.");
         db.prepare("INSERT INTO task_messages (id, task_id, author_id, author_name, body) VALUES (?, ?, ?, ?, ?)")
@@ -1079,6 +1363,7 @@ const server = createServer(async (request, response) => {
       }
       if (action === "files") {
         if (!canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
+        if (task.status === "done") return send(response, 409, { message: "Approved tasks are locked. Existing documents remain available for download." });
         saveTaskFiles(task.id, actor, body.files);
       }
       touchSession(request);
@@ -1104,6 +1389,41 @@ const server = createServer(async (request, response) => {
       return send(response, 201, { channel: { id: `group:${id}`, name, department, isGroup: true } });
     }
 
+    const chatGroupMatch = path.match(/^\/api\/chat\/groups\/([^/]+)$/);
+    if (chatGroupMatch && request.method === "PUT") {
+      if (actor.role !== "superadmin") return send(response, 403, { message: "Only Super Admin can edit group chats." });
+      const group = db.prepare("SELECT * FROM chat_groups WHERE id = ?").get(chatGroupMatch[1]);
+      if (!group) return send(response, 404, { message: "Chat group not found." });
+      const name = String(body.name ?? "").trim().slice(0, 80);
+      if (!name) throw new Error("Group name is required.");
+      db.prepare("UPDATE chat_groups SET name = ? WHERE id = ?").run(name, group.id);
+      touchSession(request);
+      return send(response, 200, {
+        channel: { id: `group:${group.id}`, name, department: group.department, isGroup: true, taskId: group.task_id ?? undefined }
+      });
+    }
+
+    if (chatGroupMatch && request.method === "DELETE") {
+      requireManager(actor);
+      const group = db.prepare("SELECT * FROM chat_groups WHERE id = ?").get(chatGroupMatch[1]);
+      if (!group) return send(response, 404, { message: "Chat group not found." });
+      if (actor.role === "admin" && group.department !== actor.department) {
+        return send(response, 403, { message: "Admins can delete group chats in their own department only." });
+      }
+      const channelId = `group:${group.id}`;
+      db.exec("BEGIN");
+      try {
+        db.prepare("DELETE FROM chat_messages WHERE channel_id = ?").run(channelId);
+        db.prepare("DELETE FROM chat_groups WHERE id = ?").run(group.id);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+      touchSession(request);
+      return send(response, 200, { ok: true });
+    }
+
     if (request.method === "POST" && path === "/api/chat/messages") {
       const channelId = String(body.channelId ?? "");
       const message = String(body.body ?? "").trim().slice(0, 2000);
@@ -1112,9 +1432,12 @@ const server = createServer(async (request, response) => {
       if (channelId.startsWith("department:")) {
         department = channelId.slice("department:".length);
       } else if (channelId.startsWith("group:")) {
-        const group = db.prepare("SELECT department FROM chat_groups WHERE id = ?").get(channelId.slice("group:".length));
+        const group = db.prepare("SELECT department, task_id FROM chat_groups WHERE id = ?").get(channelId.slice("group:".length));
         if (!group) return send(response, 404, { message: "Chat group not found." });
         department = group.department;
+        if (group.task_id && actor.role === "user" && !taskAssigneeIds(group.task_id).includes(actor.id)) {
+          return send(response, 403, { message: "This task chat is limited to its assigned workers." });
+        }
       }
       if (!department) return send(response, 404, { message: "Chat channel not found." });
       if (actor.role !== "superadmin" && actor.department !== department) {

@@ -17,8 +17,15 @@ export type TaskMessage = {
   createdAt: string;
 };
 
+export type WorkerApproval = {
+  id: string;
+  name: string;
+  approvedAt: string;
+};
+
 export type ManagedTask = {
   id: string;
+  taskCode: string;
   title: string;
   department: DepartmentName;
   priority: TaskPriority;
@@ -27,6 +34,8 @@ export type ManagedTask = {
   assigneeIds: string[];
   candidateName?: string;
   candidateNames: string[];
+  workerApprovals: WorkerApproval[];
+  pendingApprovalNames: string[];
   projectId?: string;
   projectName?: string;
   taskType: TaskType;
@@ -66,6 +75,7 @@ export type ChatChannel = {
   name: string;
   department: DepartmentName;
   isGroup: boolean;
+  taskId?: string;
 };
 
 export type ChatMessage = {
@@ -77,12 +87,24 @@ export type ChatMessage = {
   createdAt: string;
 };
 
+export type TodoItem = {
+  id: string;
+  title: string;
+  completed: boolean;
+  taskId?: string;
+  taskCode?: string;
+  taskTitle?: string;
+  createdAt: string;
+  completedAt?: string;
+};
+
 export type BootstrapData = {
   currentUser: AppUser;
   users: AppUser[];
   tasks: ManagedTask[];
   projects: Project[];
   notifications: AppNotification[];
+  todos: TodoItem[];
   chatChannels: ChatChannel[];
   chatMessages: ChatMessage[];
 };
@@ -209,13 +231,19 @@ export const api = {
   },
   touchSession: () => request<{ ok: boolean }>("/api/auth/activity", { method: "POST" }),
   bootstrap: () => request<BootstrapData>("/api/bootstrap"),
+  createTodo: (todo: { title: string; taskId?: string }) =>
+    request<{ todo: TodoItem }>("/api/todos", { method: "POST", body: JSON.stringify(todo) }),
+  updateTodo: (todo: TodoItem) =>
+    request<{ todo: TodoItem }>(`/api/todos/${todo.id}`, { method: "PUT", body: JSON.stringify(todo) }),
+  deleteTodo: (todoId: string) => request(`/api/todos/${todoId}`, { method: "DELETE" }),
+  loadChat: () => request<{ chatChannels: ChatChannel[]; chatMessages: ChatMessage[] }>("/api/chat"),
   createUser: (user: { name: string; username: string; password: string; role: UserRole; department: DepartmentName }) =>
     request("/api/users", { method: "POST", body: JSON.stringify(user) }),
   updateUser: (user: AppUser & { password?: string }) =>
     request(`/api/users/${user.id}`, { method: "PUT", body: JSON.stringify(user) }),
   deleteUser: (userId: string) => request(`/api/users/${userId}`, { method: "DELETE" }),
   async createTask(
-    task: Omit<ManagedTask, "id" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso">,
+    task: Omit<ManagedTask, "id" | "taskCode" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso" | "workerApprovals" | "pendingApprovalNames">,
     files: File[] = []
   ) {
     return request("/api/tasks", {
@@ -248,6 +276,8 @@ export const api = {
   updateProject: (projectId: string, project: { name: string; description: string; memberIds: string[] }) =>
     request(`/api/projects/${projectId}`, { method: "PUT", body: JSON.stringify(project) }),
   deleteProject: (projectId: string) => request(`/api/projects/${projectId}`, { method: "DELETE" }),
+  downloadProjectTaskTemplate: (projectId: string, projectName: string) =>
+    download(`/api/projects/${projectId}/task-sheet-template`, `${projectName}-task-sheet.xlsx`),
   async importProjectTasks(projectId: string, file: File) {
     return request<{ imported: number }>(`/api/projects/${projectId}/import`, {
       method: "POST",
@@ -259,6 +289,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name, department })
     }),
+  updateChatGroup: (channelId: string, name: string) =>
+    request<{ channel: ChatChannel }>(`/api/chat/groups/${channelId.replace(/^group:/, "")}`, {
+      method: "PUT",
+      body: JSON.stringify({ name })
+    }),
+  deleteChatGroup: (channelId: string) =>
+    request(`/api/chat/groups/${channelId.replace(/^group:/, "")}`, { method: "DELETE" }),
   sendChatMessage: (channelId: string, body: string) =>
     request("/api/chat/messages", { method: "POST", body: JSON.stringify({ channelId, body }) }),
   markNotificationsRead: () => request("/api/notifications/read", { method: "POST" })
