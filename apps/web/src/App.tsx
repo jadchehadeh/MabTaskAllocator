@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -7,6 +7,7 @@ import {
   Calendar,
   CheckCircle2,
   ClipboardList,
+  CornerUpLeft,
   Download,
   Edit3,
   FileSpreadsheet,
@@ -35,7 +36,7 @@ import {
 } from "lucide-react";
 import type { AppUser, DepartmentName, TaskPriority, TaskStatus, TaskType, UserRole } from "@mab/shared";
 import { api, getLastActivity, hasSession, inactivityLimitMs, markActivity } from "./api";
-import type { AppNotification, ChatChannel, ChatMessage, ManagedTask, Project, TodoItem } from "./api";
+import type { AppNotification, ChatChannel, ChatMessage, ChatMessageFile, ManagedTask, Project, TodoItem } from "./api";
 import { StatCard } from "./components/StatCard";
 
 const mabLogo = "/mab-logo.jpeg";
@@ -126,6 +127,25 @@ function formatFileSize(size: number) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function chatDayLabel(message: Pick<ChatMessage, "createdAt">) {
+  return message.createdAt.split(",")[0]?.trim() ?? "";
+}
+
+function chatTimeLabel(message: Pick<ChatMessage, "createdAt">) {
+  return message.createdAt.split(",")[1]?.trim() ?? message.createdAt;
+}
+
+function relativeChatDayLabel(dayLabel: string) {
+  const now = new Date();
+  const todayLabel = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayLabel = yesterday.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+  if (dayLabel === todayLabel) return "Today";
+  if (dayLabel === yesterdayLabel) return "Yesterday";
+  return dayLabel;
+}
+
 function completionDays(task: ManagedTask) {
   if (!task.completedAtIso) return null;
   const duration = (new Date(task.completedAtIso).getTime() - new Date(task.startedAt ?? task.createdAt).getTime()) / 86_400_000;
@@ -150,6 +170,15 @@ function sameDepartment(first?: string | null, second?: string | null) {
 
 function initials(name: string) {
   return name.split(" ").filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "?";
+}
+
+function renderMentionedText(body: string, currentUserName: string) {
+  return body.split(/(@\[[^\]]+\])/g).map((part, index) => {
+    const match = part.match(/^@\[([^\]]+)\]$/);
+    if (!match) return part;
+    const isCurrentUser = match[1].toLocaleLowerCase() === currentUserName.toLocaleLowerCase();
+    return <mark className={`chat-mention ${isCurrentUser ? "mine" : ""}`} key={`${part}-${index}`}>@{match[1]}</mark>;
+  });
 }
 
 function isTaskOverdue(task: Pick<ManagedTask, "dueDate" | "status">) {
@@ -213,6 +242,63 @@ function CandidatePicker({ candidates, emptyMessage, onChange, selectedIds }: Ca
       {!filteredCandidates.length ? <p className="candidate-empty candidate-no-results">No users match “{query}”.</p> : null}
       </div>
     </div>
+  );
+}
+
+function ChatAttachment({ file }: { file: ChatMessageFile }) {
+  const isImage = file.mimeType.startsWith("image/");
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [imageFailed, setImageFailed] = useState(false);
+  const [downloadState, setDownloadState] = useState<"" | "downloading" | "error">("");
+
+  useEffect(() => {
+    if (!isImage) return;
+    let objectUrl = "";
+    let cancelled = false;
+    api.loadChatFilePreview(file.id)
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setImageUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setImageFailed(true);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [file.id, isImage]);
+
+  async function download() {
+    setDownloadState("downloading");
+    try {
+      await api.downloadChatFile(file);
+      setDownloadState("");
+    } catch {
+      setDownloadState("error");
+    }
+  }
+
+  if (isImage && !imageFailed) {
+    return (
+      <button className="chat-attachment-image" onClick={download} title={`Download ${file.name}`} type="button">
+        {imageUrl ? <img src={imageUrl} alt={file.name} /> : <span className="chat-attachment-loading">Loading image…</span>}
+        {downloadState === "downloading" ? <span className="chat-download-state">Downloading…</span> : null}
+        {downloadState === "error" ? <span className="chat-download-state error">Download failed · retry</span> : null}
+      </button>
+    );
+  }
+
+  return (
+    <button className="chat-attachment-file" onClick={download} title={`Download ${file.name}`} type="button">
+      <Paperclip aria-hidden="true" size={15} />
+      <span>
+        <strong>{file.name}</strong>
+        <small>{downloadState === "downloading" ? "Downloading…" : downloadState === "error" ? "Download failed · click to retry" : formatFileSize(file.size)}</small>
+      </span>
+      <Download aria-hidden="true" size={15} />
+    </button>
   );
 }
 
@@ -324,15 +410,27 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [chatChannels, setChatChannels] = useState<ChatChannel[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const chatMessageListRef = useRef<HTMLDivElement | null>(null);
   const [selectedChannelId, setSelectedChannelId] = useState("");
   const [chatDraft, setChatDraft] = useState("");
   const [chatStatus, setChatStatus] = useState("");
+  const [chatFiles, setChatFiles] = useState<File[]>([]);
+  const [chatSending, setChatSending] = useState(false);
+  const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
   const [editingChatMessageId, setEditingChatMessageId] = useState("");
+  const [deletingChatMessage, setDeletingChatMessage] = useState<ChatMessage | null>(null);
   const [chatMessageEditDraft, setChatMessageEditDraft] = useState("");
   const [showGroupForm, setShowGroupForm] = useState(false);
   const [groupDraft, setGroupDraft] = useState({ name: "", department: defaultDepartments[0] });
   const [editingChatGroupId, setEditingChatGroupId] = useState("");
   const [chatGroupNameDraft, setChatGroupNameDraft] = useState("");
+  const [showChatPanel, setShowChatPanel] = useState(false);
+  const [showAiAssistant, setShowAiAssistant] = useState(false);
+  const [aiDraft, setAiDraft] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiMessages, setAiMessages] = useState<Array<{ role: "user" | "assistant"; text: string }>>([
+    { role: "assistant", text: "Hello! I’m the MAB AI assistant. Ask me to help organize work, draft a task update, summarize an issue, or plan your day." }
+  ]);
   const [activeView, setActiveView] = useState<
     "dashboard" | "projects" | "tasks" | "todos" | "finished" | "people" | "team" | "productivity" | "chat"
   >("dashboard");
@@ -693,6 +791,34 @@ export function App() {
   const unreadNotifications = notifications.filter((notification) => !notification.isRead).length;
   const selectedChatChannel = chatChannels.find((channel) => channel.id === selectedChannelId);
   const selectedChatMessages = chatMessages.filter((message) => message.channelId === selectedChannelId);
+  const selectedChatTask = selectedChatChannel?.taskId ? tasks.find((task) => task.id === selectedChatChannel.taskId) : undefined;
+  const selectedChatParticipants = selectedChatChannel?.isDirect
+    ? users.filter((user) => user.id === currentUser?.id || user.id === selectedChatChannel.participantId)
+    : users.filter((user) => {
+        if (!selectedChatChannel) return false;
+        if (user.role === "superadmin") return true;
+        if (!sameDepartment(user.department, selectedChatChannel.department)) return false;
+        if (!selectedChatTask) return true;
+        return user.role === "admin" || selectedChatTask.assigneeIds.includes(user.id);
+      });
+  const mentionMatch = chatDraft.match(/@([^@\[\]\n]*)$/);
+  const mentionQuery = mentionMatch?.[1].trim().toLocaleLowerCase() ?? "";
+  const mentionCandidates = mentionMatch
+    ? selectedChatParticipants.filter((user) => user.id !== currentUser?.id && (
+        user.name.toLocaleLowerCase().includes(mentionQuery) || user.username.toLocaleLowerCase().includes(mentionQuery)
+      )).slice(0, 6)
+    : [];
+  const newestSelectedChatMessageId = selectedChatMessages[selectedChatMessages.length - 1]?.id;
+
+  useEffect(() => {
+    if (!showChatPanel) return;
+    const frame = window.requestAnimationFrame(() => {
+      const messageList = chatMessageListRef.current;
+      if (!messageList) return;
+      messageList.scrollTo({ top: messageList.scrollHeight, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [showChatPanel, selectedChannelId, newestSelectedChatMessageId]);
   const canDeleteSelectedChatGroup = Boolean(selectedChatChannel?.isGroup && (
     currentUser?.role === "superadmin" ||
     (currentUser?.role === "admin" && selectedChatChannel.department === currentUser.department)
@@ -702,6 +828,10 @@ export function App() {
     if (currentUser?.role === "user") setActiveTaskSection(section === "free" ? "free" : "assigned");
     else setManagerTaskSection(section === "review" ? "review" : section === "free" ? "free" : "all");
     setActiveView("tasks");
+  }
+
+  function insertChatMention(user: AppUser) {
+    setChatDraft((draft) => draft.replace(/@([^@\[\]\n]*)$/, `@[${user.name}] `));
   }
 
   function userMetrics(userId: string, month = "") {
@@ -773,8 +903,21 @@ export function App() {
     }
   }
 
+  function selectChatChannel(channelId: string) {
+    setSelectedChannelId(channelId);
+    setReplyingTo(null);
+    setChatFiles([]);
+    if (!channelId) return;
+    setChatChannels((channels) => channels.map((channel) => channel.id === channelId ? { ...channel, unreadCount: 0 } : channel));
+    void api.markChatRead(channelId).catch(() => undefined);
+  }
+
   async function openDepartmentChat() {
-    setActiveView("chat");
+    if (showChatPanel) {
+      setShowChatPanel(false);
+      return;
+    }
+    setShowChatPanel(true);
     setChatStatus("");
     try {
       const data = await api.loadChat();
@@ -782,9 +925,31 @@ export function App() {
       setChatMessages(data.chatMessages);
       const departmentChannel = data.chatChannels.find((channel) =>
         !channel.isGroup && !channel.isDirect && (currentUser?.role === "superadmin" || channel.department === currentUser?.department));
-      setSelectedChannelId(departmentChannel?.id ?? data.chatChannels[0]?.id ?? "");
+      selectChatChannel(departmentChannel?.id ?? data.chatChannels[0]?.id ?? "");
     } catch (error) {
       setChatStatus(error instanceof Error ? error.message : "Could not open Department Chat.");
+    }
+  }
+
+  function startReplyToChatMessage(message: ChatMessage) {
+    setReplyingTo(message);
+  }
+
+  async function sendAiMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = aiDraft.trim();
+    if (!message || aiLoading) return;
+    const history = aiMessages.slice(-10);
+    setAiDraft("");
+    setAiMessages((items) => [...items, { role: "user", text: message }]);
+    setAiLoading(true);
+    try {
+      const result = await api.askAiAssistant(message, history);
+      setAiMessages((items) => [...items, { role: "assistant", text: result.reply }]);
+    } catch (error) {
+      setAiMessages((items) => [...items, { role: "assistant", text: error instanceof Error ? error.message : "The AI assistant is unavailable right now." }]);
+    } finally {
+      setAiLoading(false);
     }
   }
 
@@ -1287,15 +1452,42 @@ export function App() {
   async function sendDepartmentMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const message = chatDraft.trim();
-    if (!selectedChannelId || !message) return;
+    if (!selectedChannelId || (!message && !chatFiles.length)) return;
+    if (chatSending) return;
     try {
-      await api.sendChatMessage(selectedChannelId, message);
+      setChatSending(true);
+      setChatStatus(chatFiles.length ? `Uploading ${chatFiles.length} attachment${chatFiles.length === 1 ? "" : "s"}…` : "Sending message…");
+      await api.sendChatMessage(selectedChannelId, message, chatFiles, replyingTo?.id);
       setChatDraft("");
-      setChatStatus("");
-      await refreshData(true);
+      setChatFiles([]);
+      setReplyingTo(null);
+      const data = await api.loadChat();
+      setChatChannels(data.chatChannels);
+      setChatMessages(data.chatMessages);
+      setChatStatus(chatFiles.length ? "Attachment uploaded successfully." : "");
     } catch (error) {
       setChatStatus(error instanceof Error ? error.message : "Could not send this message.");
+    } finally {
+      setChatSending(false);
     }
+  }
+
+  function selectChatAttachments(files: FileList | null) {
+    const incoming = Array.from(files ?? []);
+    if (!incoming.length) return;
+    const oversized = incoming.find((file) => file.size > 10 * 1024 * 1024);
+    if (oversized) {
+      setChatStatus(`${oversized.name} exceeds the 10 MB file limit.`);
+      return;
+    }
+    setChatFiles((current) => {
+      const unique = [...current, ...incoming].filter((file, index, all) =>
+        all.findIndex((item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified) === index
+      );
+      if (unique.length > 5) setChatStatus("You can attach up to 5 files to one message.");
+      else setChatStatus(`${unique.length} attachment${unique.length === 1 ? "" : "s"} ready to upload.`);
+      return unique.slice(0, 5);
+    });
   }
 
   async function saveChatMessage(messageId: string) {
@@ -1312,16 +1504,17 @@ export function App() {
     }
   }
 
-  function deleteChatMessage(messageId: string) {
-    requestConfirmation("Delete this chat message? This cannot be undone.", async () => {
-      try {
-        await api.deleteChatMessage(messageId);
-        setChatMessages((messages) => messages.filter((message) => message.id !== messageId));
-        setChatStatus("Message deleted.");
-      } catch (error) {
-        setChatStatus(error instanceof Error ? error.message : "Could not delete this message.");
-      }
-    });
+  async function deleteChatMessage(message: ChatMessage, scope: "me" | "everyone") {
+    try {
+      await api.deleteChatMessage(message.id, scope);
+      setChatMessages((messages) => scope === "me"
+        ? messages.filter((item) => item.id !== message.id)
+        : messages.map((item) => item.id === message.id ? { ...item, body: "", files: [], isDeleted: true } : item));
+      setDeletingChatMessage(null);
+      setChatStatus(scope === "me" ? "Message removed from your chat." : "Message deleted for everyone.");
+    } catch (error) {
+      setChatStatus(error instanceof Error ? error.message : "Could not delete this message.");
+    }
   }
 
   async function createChatGroup(event: FormEvent<HTMLFormElement>) {
@@ -1963,20 +2156,24 @@ export function App() {
   const departmentChatChannels = chatChannels.filter((channel) => !channel.isGroup && !channel.isDirect);
   const groupChatChannels = chatChannels.filter((channel) => channel.isGroup);
   const directChatChannels = chatChannels.filter((channel) => channel.isDirect);
+  const unreadChatMessages = chatChannels.reduce((total, channel) => total + (channel.unreadCount ?? 0), 0);
   const lastMessageByChannel = new Map<string, ChatMessage>();
   for (const message of chatMessages) lastMessageByChannel.set(message.channelId, message);
 
   function renderChatChannelButton(channel: ChatChannel) {
     const preview = lastMessageByChannel.get(channel.id);
+    const previewBody = preview?.body || (preview?.files.length ? `📎 ${preview.files.length} attachment${preview.files.length > 1 ? "s" : ""}` : "");
     const previewText = preview
-      ? `${preview.authorId === currentUser?.id ? "You: " : ""}${preview.body}`
+      ? `${preview.authorId === currentUser?.id ? "You: " : ""}${previewBody}`
       : channel.isDirect ? "No messages yet" : channel.isGroup ? "Group chat" : "Broadcast to the whole department";
+    const isActive = channel.id === selectedChannelId;
+    const unreadCount = isActive ? 0 : channel.unreadCount ?? 0;
 
     return (
       <button
-        className={channel.id === selectedChannelId ? "active" : ""}
+        className={isActive ? "active" : ""}
         key={channel.id}
-        onClick={() => setSelectedChannelId(channel.id)}
+        onClick={() => selectChatChannel(channel.id)}
         type="button"
       >
         {channel.isDirect ? (
@@ -1988,11 +2185,330 @@ export function App() {
         ) : (
           <MessageSquare aria-hidden="true" size={16} />
         )}
-        <span>
+        <span className="chat-channel-text">
           <strong>{channel.name}</strong>
-          <small>{previewText}</small>
+          <small className={unreadCount ? "chat-channel-preview-unread" : ""}>{previewText}</small>
         </span>
+        {unreadCount ? <b className="chat-unread-badge">{unreadCount > 99 ? "99+" : unreadCount}</b> : null}
       </button>
+    );
+  }
+
+  function renderChatPanel() {
+    if (!currentUser) return null;
+    return (
+          <section className="panel chat-panel" id="department-chat">
+            <div className="panel-header">
+              <div>
+                <p>{selectedChatChannel?.isDirect ? `Private message · ${selectedChatChannel.department}` : selectedChatChannel?.department ?? currentUser.department}</p>
+                <h2>{selectedChatChannel?.name ?? "Department Chat"}</h2>
+                <details className="chat-participants">
+                  <summary>
+                    <span className="chat-participant-stack" aria-hidden="true">
+                      {selectedChatParticipants.slice(0, 4).map((user) => <i key={user.id} style={{ background: identityColor(user.id, currentUser.id) }}>{initials(user.name)}</i>)}
+                    </span>
+                    {selectedChatParticipants.length} member{selectedChatParticipants.length === 1 ? "" : "s"}
+                  </summary>
+                  <div className="chat-participant-popover">
+                    <strong>People in this conversation</strong>
+                    {selectedChatParticipants.map((user) => (
+                      <button key={user.id} onClick={() => insertChatMention(user)} type="button">
+                        <span style={{ background: identityColor(user.id, currentUser.id) }}>{initials(user.name)}</span>
+                        <span><b>{user.name}</b><small>{user.role} · {user.department}</small></span>
+                      </button>
+                    ))}
+                  </div>
+                </details>
+              </div>
+              <div className="chat-management-actions">
+                <button
+                  className={`ghost-button ai-toggle-button ${showAiAssistant ? "active" : ""}`}
+                  onClick={() => setShowAiAssistant((visible) => !visible)}
+                  type="button"
+                  aria-expanded={showAiAssistant}
+                >
+                  <Sparkles aria-hidden="true" size={16} />
+                  AI Assistant
+                </button>
+                {canManagePeople ? (
+                  <>
+                  {selectedChatChannel?.isGroup && currentUser.role === "superadmin" ? (
+                    <button
+                      className="icon-button"
+                      onClick={() => {
+                        setEditingChatGroupId(selectedChatChannel.id);
+                        setChatGroupNameDraft(selectedChatChannel.name);
+                      }}
+                      type="button"
+                      aria-label={`Edit ${selectedChatChannel.name}`}
+                      title="Edit group name"
+                    >
+                      <Edit3 aria-hidden="true" size={16} />
+                    </button>
+                  ) : null}
+                  {selectedChatChannel && canDeleteSelectedChatGroup ? (
+                    <button
+                      className="icon-button danger"
+                      onClick={() => deleteChatGroup(selectedChatChannel)}
+                      type="button"
+                      aria-label={`Delete ${selectedChatChannel.name}`}
+                      title="Delete group chat"
+                    >
+                      <Trash2 aria-hidden="true" size={16} />
+                    </button>
+                  ) : null}
+                  <button
+                    className="ghost-button"
+                    onClick={() => setShowGroupForm((visible) => !visible)}
+                    type="button"
+                  >
+                    <Plus aria-hidden="true" size={17} />
+                    Create Group
+                  </button>
+                  </>
+                ) : null}
+                <button
+                  className="icon-button chat-close-button"
+                  onClick={() => setShowChatPanel(false)}
+                  type="button"
+                  aria-label="Close messages"
+                  title="Close messages"
+                >
+                  <X aria-hidden="true" size={18} />
+                </button>
+              </div>
+            </div>
+
+            {selectedChatChannel?.isGroup && editingChatGroupId === selectedChatChannel.id && currentUser.role === "superadmin" ? (
+              <form className="chat-edit-form" onSubmit={saveChatGroup}>
+                <input
+                  autoFocus
+                  maxLength={80}
+                  onChange={(event) => setChatGroupNameDraft(event.target.value)}
+                  value={chatGroupNameDraft}
+                  aria-label="Group chat name"
+                />
+                <button className="primary-button" type="submit"><Save aria-hidden="true" size={16} />Save Name</button>
+                <button className="ghost-button" onClick={() => {
+                  setEditingChatGroupId("");
+                  setChatGroupNameDraft("");
+                }} type="button">Cancel</button>
+              </form>
+            ) : null}
+
+            {showGroupForm && canManagePeople ? (
+              <form className="chat-group-form" onSubmit={createChatGroup}>
+                <input
+                  onChange={(event) => setGroupDraft((draft) => ({ ...draft, name: event.target.value }))}
+                  placeholder="Group name"
+                  value={groupDraft.name}
+                />
+                {currentUser.role === "superadmin" ? (
+                  <select
+                    onChange={(event) => setGroupDraft((draft) => ({
+                      ...draft,
+                      department: event.target.value as DepartmentName
+                    }))}
+                    value={groupDraft.department}
+                  >
+                    {departments.map((department) => (
+                      <option key={department} value={department}>{department}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input readOnly value={currentUser.department} />
+                )}
+                <button className="primary-button" type="submit">
+                  <Users aria-hidden="true" size={17} />
+                  Create for Department
+                </button>
+              </form>
+            ) : null}
+
+            <div className="chat-layout">
+              <aside className="chat-channel-list" aria-label="Chat channels">
+                <p className="chat-channel-section-label">Department</p>
+                {departmentChatChannels.map((channel) => renderChatChannelButton(channel))}
+                {groupChatChannels.length ? (
+                  <>
+                    <p className="chat-channel-section-label">Groups</p>
+                    {groupChatChannels.map((channel) => renderChatChannelButton(channel))}
+                  </>
+                ) : null}
+                {directChatChannels.length ? (
+                  <>
+                    <p className="chat-channel-section-label">Direct Messages</p>
+                    {directChatChannels.map((channel) => renderChatChannelButton(channel))}
+                  </>
+                ) : null}
+              </aside>
+
+              <div className="chat-room">
+                <div className="chat-message-list" aria-live="polite" ref={chatMessageListRef}>
+                  {selectedChatMessages.length ? selectedChatMessages.map((message, index) => {
+                    const previous = selectedChatMessages[index - 1];
+                    const dayLabel = chatDayLabel(message);
+                    const showDateSeparator = !previous || chatDayLabel(previous) !== dayLabel;
+                    const mine = message.authorId === currentUser.id;
+                    const grouped = Boolean(previous && !showDateSeparator && previous.authorId === message.authorId);
+                    return (
+                      <div className="chat-message-wrap" key={message.id}>
+                        {showDateSeparator ? (
+                          <div className="chat-date-separator"><span>{relativeChatDayLabel(dayLabel)}</span></div>
+                        ) : null}
+                        <article className={`chat-message ${mine ? "mine" : ""} ${grouped ? "grouped" : ""}`}>
+                          <span className="chat-message-avatar" style={{ background: identityColor(message.authorId, currentUser.id) }}>
+                            {initials(message.authorName)}
+                          </span>
+                          <div className="chat-message-bubble">
+                            <div>
+                              <strong style={{ color: identityColor(message.authorId, currentUser.id) }}>{message.authorName}</strong>
+                              <span>{chatTimeLabel(message)}</span>
+                            </div>
+                            {message.replyTo && !message.isDeleted ? (
+                              <div className="chat-quote">
+                                <strong>{message.replyTo.authorName}</strong>
+                                <p>{message.replyTo.body || "📎 Attachment"}</p>
+                              </div>
+                            ) : null}
+                            {message.files.length && !message.isDeleted ? (
+                              <div className="chat-attachments">
+                                {message.files.map((file) => <ChatAttachment file={file} key={file.id} />)}
+                              </div>
+                            ) : null}
+                            {message.isDeleted ? (
+                              <p className="chat-message-deleted"><Trash2 aria-hidden="true" size={13} />This message was deleted</p>
+                            ) : editingChatMessageId === message.id ? (
+                              <div className="message-edit-form chat-message-edit">
+                                <input
+                                  autoFocus
+                                  maxLength={2000}
+                                  onChange={(event) => setChatMessageEditDraft(event.target.value)}
+                                  value={chatMessageEditDraft}
+                                />
+                                <button className="icon-button" onClick={() => saveChatMessage(message.id)} type="button" aria-label="Save message"><Save aria-hidden="true" size={15} /></button>
+                                <button className="icon-button" onClick={() => { setEditingChatMessageId(""); setChatMessageEditDraft(""); }} type="button" aria-label="Cancel editing"><X aria-hidden="true" size={15} /></button>
+                              </div>
+                            ) : message.body ? <p>{renderMentionedText(message.body, currentUser.name)}</p> : null}
+                            {editingChatMessageId !== message.id && !message.isDeleted ? (
+                              <div className="message-actions">
+                                <button onClick={() => startReplyToChatMessage(message)} type="button"><CornerUpLeft aria-hidden="true" size={13} />Reply</button>
+                                {mine ? (
+                                  <>
+                                    <button onClick={() => { setEditingChatMessageId(message.id); setChatMessageEditDraft(message.body); }} type="button"><Edit3 aria-hidden="true" size={13} />Edit</button>
+                                  </>
+                                ) : null}
+                                <button className="danger" onClick={() => setDeletingChatMessage(message)} type="button"><Trash2 aria-hidden="true" size={13} />Delete</button>
+                              </div>
+                            ) : null}
+                          </div>
+                        </article>
+                      </div>
+                    );
+                  }) : (
+                    <p className="empty-state">
+                      {selectedChatChannel?.isDirect ? `No messages yet. Say hello to ${selectedChatChannel.name}.` : "No messages yet. Say hello to your department."}
+                    </p>
+                  )}
+                </div>
+
+                {replyingTo ? (
+                  <div className="chat-reply-banner">
+                    <CornerUpLeft aria-hidden="true" size={16} />
+                    <div>
+                      <strong>Replying to {replyingTo.authorName}</strong>
+                      <span>{replyingTo.body || (replyingTo.files.length ? `📎 ${replyingTo.files.length} attachment(s)` : "")}</span>
+                    </div>
+                    <button type="button" className="icon-button" onClick={() => setReplyingTo(null)} aria-label="Cancel reply">
+                      <X aria-hidden="true" size={14} />
+                    </button>
+                  </div>
+                ) : null}
+
+                {chatFiles.length ? (
+                  <div className="chat-staged-files">
+                    {chatFiles.map((file, index) => (
+                      <span className="chat-staged-file" key={`${file.name}-${index}`}>
+                        <Paperclip aria-hidden="true" size={13} />
+                        {file.name}
+                        <button
+                          aria-label={`Remove ${file.name}`}
+                          onClick={() => setChatFiles((files) => files.filter((_, fileIndex) => fileIndex !== index))}
+                          type="button"
+                        >
+                          <X aria-hidden="true" size={12} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+
+                <form className="chat-compose" onSubmit={sendDepartmentMessage}>
+                  {mentionMatch && mentionCandidates.length ? (
+                    <div className="chat-mention-picker" role="listbox" aria-label="Mention a conversation member">
+                      <small>Mention someone</small>
+                      {mentionCandidates.map((user) => (
+                        <button key={user.id} onClick={() => insertChatMention(user)} type="button">
+                          <span style={{ background: identityColor(user.id, currentUser.id) }}>{initials(user.name)}</span>
+                          <span><strong>{user.name}</strong><small>{user.username}</small></span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="emoji-picker department-emojis" aria-label="Quick emojis">
+                    {quickEmojis.map((emoji) => (
+                      <button key={emoji} type="button" onClick={() => setChatDraft((draft) => `${draft}${emoji}`)} aria-label={`Add ${emoji}`}>{emoji}</button>
+                    ))}
+                  </div>
+                  <label className="chat-attach-button" title="Attach files">
+                    <Paperclip aria-hidden="true" size={18} />
+                    <input
+                      disabled={!selectedChannelId || chatSending}
+                      multiple
+                      onChange={(event) => {
+                        selectChatAttachments(event.target.files);
+                        event.target.value = "";
+                      }}
+                      type="file"
+                    />
+                  </label>
+                  <input
+                    className={chatDraft ? "typing-input" : ""}
+                    disabled={!selectedChannelId || chatSending}
+                    maxLength={2000}
+                    onChange={(event) => setChatDraft(event.target.value)}
+                    placeholder="Write a message"
+                    value={chatDraft}
+                  />
+                  <button className="primary-button" disabled={chatSending || !selectedChannelId || (!chatDraft.trim() && !chatFiles.length)} type="submit">
+                    {chatSending ? (chatFiles.length ? "Uploading…" : "Sending…") : "Send"}
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            {showAiAssistant ? (
+              <section className="ai-assistant" aria-label="MAB AI assistant">
+                <header>
+                  <span><Sparkles aria-hidden="true" size={17} /></span>
+                  <div><strong>MAB AI Assistant</strong><small>Private conversation · responses may need review</small></div>
+                  <button className="icon-button" type="button" onClick={() => setShowAiAssistant(false)} aria-label="Close AI assistant"><X size={15} /></button>
+                </header>
+                <div className="ai-message-list" aria-live="polite">
+                  {aiMessages.map((message, index) => (
+                    <p className={message.role} key={`${message.role}-${index}`}>{message.text}</p>
+                  ))}
+                  {aiLoading ? <p className="assistant ai-thinking">Thinking…</p> : null}
+                </div>
+                <form onSubmit={sendAiMessage}>
+                  <input maxLength={2000} value={aiDraft} onChange={(event) => setAiDraft(event.target.value)} placeholder="Ask the MAB assistant…" />
+                  <button className="primary-button" disabled={!aiDraft.trim() || aiLoading} type="submit">Ask</button>
+                </form>
+              </section>
+            ) : null}
+            {chatStatus ? <p className="success-message">{chatStatus}</p> : null}
+          </section>
+
     );
   }
 
@@ -2051,15 +2567,6 @@ export function App() {
             <Archive aria-hidden="true" size={17} />
             Finished Tasks
             <span>{finishedTasks.length}</span>
-          </button>
-          <button
-            type="button"
-            className={`sidebar-nav-button ${activeView === "chat" ? "active" : ""}`}
-            onClick={() => void openDepartmentChat()}
-          >
-            <MessageSquare aria-hidden="true" size={17} />
-            Department Chat
-            <span>{chatChannels.length}</span>
           </button>
           <button
             type="button"
@@ -2967,182 +3474,6 @@ export function App() {
             </div>
             {peopleMessage ? <p className="success-message">{peopleMessage}</p> : null}
           </section>
-        ) : activeView === "chat" ? (
-          <section className="panel chat-panel" id="department-chat">
-            <div className="panel-header">
-              <div>
-                <p>{selectedChatChannel?.isDirect ? `Private message · ${selectedChatChannel.department}` : selectedChatChannel?.department ?? currentUser.department}</p>
-                <h2>{selectedChatChannel?.name ?? "Department Chat"}</h2>
-              </div>
-              {canManagePeople ? (
-                <div className="chat-management-actions">
-                  {selectedChatChannel?.isGroup && currentUser.role === "superadmin" ? (
-                    <button
-                      className="icon-button"
-                      onClick={() => {
-                        setEditingChatGroupId(selectedChatChannel.id);
-                        setChatGroupNameDraft(selectedChatChannel.name);
-                      }}
-                      type="button"
-                      aria-label={`Edit ${selectedChatChannel.name}`}
-                      title="Edit group name"
-                    >
-                      <Edit3 aria-hidden="true" size={16} />
-                    </button>
-                  ) : null}
-                  {selectedChatChannel && canDeleteSelectedChatGroup ? (
-                    <button
-                      className="icon-button danger"
-                      onClick={() => deleteChatGroup(selectedChatChannel)}
-                      type="button"
-                      aria-label={`Delete ${selectedChatChannel.name}`}
-                      title="Delete group chat"
-                    >
-                      <Trash2 aria-hidden="true" size={16} />
-                    </button>
-                  ) : null}
-                  <button
-                    className="ghost-button"
-                    onClick={() => setShowGroupForm((visible) => !visible)}
-                    type="button"
-                  >
-                    <Plus aria-hidden="true" size={17} />
-                    Create Group
-                  </button>
-                </div>
-              ) : null}
-            </div>
-
-            {selectedChatChannel?.isGroup && editingChatGroupId === selectedChatChannel.id && currentUser.role === "superadmin" ? (
-              <form className="chat-edit-form" onSubmit={saveChatGroup}>
-                <input
-                  autoFocus
-                  maxLength={80}
-                  onChange={(event) => setChatGroupNameDraft(event.target.value)}
-                  value={chatGroupNameDraft}
-                  aria-label="Group chat name"
-                />
-                <button className="primary-button" type="submit"><Save aria-hidden="true" size={16} />Save Name</button>
-                <button className="ghost-button" onClick={() => {
-                  setEditingChatGroupId("");
-                  setChatGroupNameDraft("");
-                }} type="button">Cancel</button>
-              </form>
-            ) : null}
-
-            {showGroupForm && canManagePeople ? (
-              <form className="chat-group-form" onSubmit={createChatGroup}>
-                <input
-                  onChange={(event) => setGroupDraft((draft) => ({ ...draft, name: event.target.value }))}
-                  placeholder="Group name"
-                  value={groupDraft.name}
-                />
-                {currentUser.role === "superadmin" ? (
-                  <select
-                    onChange={(event) => setGroupDraft((draft) => ({
-                      ...draft,
-                      department: event.target.value as DepartmentName
-                    }))}
-                    value={groupDraft.department}
-                  >
-                    {departments.map((department) => (
-                      <option key={department} value={department}>{department}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input readOnly value={currentUser.department} />
-                )}
-                <button className="primary-button" type="submit">
-                  <Users aria-hidden="true" size={17} />
-                  Create for Department
-                </button>
-              </form>
-            ) : null}
-
-            <div className="chat-layout">
-              <aside className="chat-channel-list" aria-label="Chat channels">
-                <p className="chat-channel-section-label">Department</p>
-                {departmentChatChannels.map((channel) => renderChatChannelButton(channel))}
-                {groupChatChannels.length ? (
-                  <>
-                    <p className="chat-channel-section-label">Groups</p>
-                    {groupChatChannels.map((channel) => renderChatChannelButton(channel))}
-                  </>
-                ) : null}
-                {directChatChannels.length ? (
-                  <>
-                    <p className="chat-channel-section-label">Direct Messages</p>
-                    {directChatChannels.map((channel) => renderChatChannelButton(channel))}
-                  </>
-                ) : null}
-              </aside>
-
-              <div className="chat-room">
-                <div className="chat-message-list" aria-live="polite">
-                  {selectedChatMessages.length ? selectedChatMessages.map((message) => {
-                    const mine = message.authorId === currentUser.id;
-                    return (
-                      <article
-                        className={mine ? "chat-message mine" : "chat-message"}
-                        key={message.id}
-                      >
-                        <span className="chat-message-avatar" style={{ background: identityColor(message.authorId, currentUser.id) }}>
-                          {initials(message.authorName)}
-                        </span>
-                        <div className="chat-message-bubble">
-                          <div>
-                            <strong style={{ color: identityColor(message.authorId, currentUser.id) }}>{message.authorName}</strong>
-                            <span>{message.createdAt}</span>
-                          </div>
-                          {editingChatMessageId === message.id ? (
-                            <div className="message-edit-form chat-message-edit">
-                              <input
-                                autoFocus
-                                maxLength={2000}
-                                onChange={(event) => setChatMessageEditDraft(event.target.value)}
-                                value={chatMessageEditDraft}
-                              />
-                              <button className="icon-button" onClick={() => saveChatMessage(message.id)} type="button" aria-label="Save message"><Save aria-hidden="true" size={15} /></button>
-                              <button className="icon-button" onClick={() => { setEditingChatMessageId(""); setChatMessageEditDraft(""); }} type="button" aria-label="Cancel editing"><X aria-hidden="true" size={15} /></button>
-                            </div>
-                          ) : <p>{message.body}</p>}
-                          {mine && editingChatMessageId !== message.id ? (
-                            <div className="message-actions">
-                              <button onClick={() => { setEditingChatMessageId(message.id); setChatMessageEditDraft(message.body); }} type="button"><Edit3 aria-hidden="true" size={13} />Edit</button>
-                              <button className="danger" onClick={() => deleteChatMessage(message.id)} type="button"><Trash2 aria-hidden="true" size={13} />Delete</button>
-                            </div>
-                          ) : null}
-                        </div>
-                      </article>
-                    );
-                  }) : (
-                    <p className="empty-state">
-                      {selectedChatChannel?.isDirect ? `No messages yet. Say hello to ${selectedChatChannel.name}.` : "No messages yet. Say hello to your department."}
-                    </p>
-                  )}
-                </div>
-                <form className="chat-compose" onSubmit={sendDepartmentMessage}>
-                  <div className="emoji-picker department-emojis" aria-label="Quick emojis">
-                    {quickEmojis.map((emoji) => (
-                      <button key={emoji} type="button" onClick={() => setChatDraft((draft) => `${draft}${emoji}`)} aria-label={`Add ${emoji}`}>{emoji}</button>
-                    ))}
-                  </div>
-                  <input
-                    className={chatDraft ? "typing-input" : ""}
-                    disabled={!selectedChannelId}
-                    maxLength={2000}
-                    onChange={(event) => setChatDraft(event.target.value)}
-                    placeholder="Write a message"
-                    value={chatDraft}
-                  />
-                  <button className="primary-button" disabled={!selectedChannelId || !chatDraft.trim()} type="submit">
-                    Send
-                  </button>
-                </form>
-              </div>
-            </div>
-            {chatStatus ? <p className="success-message">{chatStatus}</p> : null}
-          </section>
         ) : (
           <section className="panel finished-panel" id="finished-tasks">
             <header className="archive-header">
@@ -3214,6 +3545,24 @@ export function App() {
           </section>
         )}
       </section>
+      {showChatPanel ? renderChatPanel() : null}
+      <button
+        aria-expanded={showChatPanel}
+        aria-controls="department-chat"
+        aria-label={showChatPanel ? "Close messages" : "Open messages"}
+        className={`chat-launcher ${showChatPanel ? "open" : ""}`}
+        onClick={() => void openDepartmentChat()}
+        type="button"
+      >
+        <span className="chat-launcher-avatar" aria-hidden="true">
+          {showChatPanel ? <X size={19} /> : <MessageSquare size={19} />}
+        </span>
+        <span className="chat-launcher-copy">
+          <strong>{showChatPanel ? "Close messages" : "Messages"}</strong>
+          <small>{unreadChatMessages ? `${unreadChatMessages} unread` : "Department & direct chat"}</small>
+        </span>
+        {unreadChatMessages && !showChatPanel ? <b>{unreadChatMessages > 99 ? "99+" : unreadChatMessages}</b> : null}
+      </button>
       {showTaskComposer && canAllocateTasks ? (
         <div className="task-composer-backdrop" role="presentation" onMouseDown={() => setShowTaskComposer(false)}>
           <section className="task-composer-dialog" role="dialog" aria-modal="true" aria-labelledby="new-task-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -3282,6 +3631,26 @@ export function App() {
                 void action();
               }}>{confirmation.confirmLabel}</button>
             </div>
+          </section>
+        </div>
+      ) : null}
+      {deletingChatMessage ? (
+        <div className="confirmation-backdrop chat-delete-backdrop" role="presentation" onMouseDown={() => setDeletingChatMessage(null)}>
+          <section className="confirmation-dialog chat-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-message-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="confirmation-icon"><Trash2 aria-hidden="true" size={23} /></div>
+            <h2 id="delete-message-title">Delete message?</h2>
+            <p>Choose whether to remove it only from your view or from the conversation.</p>
+            <div className="chat-delete-options">
+              <button className="ghost-button" type="button" onClick={() => void deleteChatMessage(deletingChatMessage, "me")}>
+                <Trash2 aria-hidden="true" size={16} /><span><strong>Delete for me</strong><small>Other people will still see this message.</small></span>
+              </button>
+              {deletingChatMessage.authorId === currentUser.id ? (
+                <button className="danger-button" type="button" onClick={() => void deleteChatMessage(deletingChatMessage, "everyone")}>
+                  <Users aria-hidden="true" size={16} /><span><strong>Delete for everyone</strong><small>A deleted-message notice will remain.</small></span>
+                </button>
+              ) : null}
+            </div>
+            <button className="ghost-button" type="button" onClick={() => setDeletingChatMessage(null)}>Cancel</button>
           </section>
         </div>
       ) : null}

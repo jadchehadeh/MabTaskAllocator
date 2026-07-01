@@ -85,6 +85,20 @@ export type ChatChannel = {
   taskId?: string;
   isDirect?: boolean;
   participantId?: string;
+  unreadCount?: number;
+};
+
+export type ChatMessageFile = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
+export type ChatMessageReplyPreview = {
+  id: string;
+  authorName: string;
+  body: string;
 };
 
 export type ChatMessage = {
@@ -94,6 +108,9 @@ export type ChatMessage = {
   authorName: string;
   body: string;
   createdAt: string;
+  files: ChatMessageFile[];
+  replyTo?: ChatMessageReplyPreview;
+  isDeleted?: boolean;
 };
 
 export type TodoItem = {
@@ -315,11 +332,31 @@ export const api = {
     }),
   deleteChatGroup: (channelId: string) =>
     request(`/api/chat/groups/${channelId.replace(/^group:/, "")}`, { method: "DELETE" }),
-  sendChatMessage: (channelId: string, body: string) =>
-    request("/api/chat/messages", { method: "POST", body: JSON.stringify({ channelId, body }) }),
+  async sendChatMessage(channelId: string, body: string, files: File[] = [], replyToId?: string) {
+    return request("/api/chat/messages", {
+      method: "POST",
+      body: JSON.stringify({ channelId, body, replyToId, files: await encodeFiles(files) })
+    });
+  },
   updateChatMessage: (messageId: string, body: string) =>
     request(`/api/chat/messages/${messageId}`, { method: "PUT", body: JSON.stringify({ body }) }),
-  deleteChatMessage: (messageId: string) =>
-    request(`/api/chat/messages/${messageId}`, { method: "DELETE" }),
+  deleteChatMessage: (messageId: string, scope: "me" | "everyone") =>
+    request(`/api/chat/messages/${messageId}`, { method: "DELETE", body: JSON.stringify({ scope }) }),
+  downloadChatFile: (file: ChatMessageFile) => download(`/api/chat/files/${file.id}/download`, file.name),
+  async loadChatFilePreview(fileId: string) {
+    const token = window.sessionStorage.getItem(tokenKey);
+    const response = await fetch(`/api/chat/files/${fileId}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    });
+    if (!response.ok) throw new Error("Could not load this image.");
+    return response.blob();
+  },
+  markChatRead: (channelId: string) =>
+    request("/api/chat/read", { method: "POST", body: JSON.stringify({ channelId }) }),
+  askAiAssistant: (message: string, history: Array<{ role: "user" | "assistant"; text: string }>) =>
+    request<{ reply: string; configured: boolean }>("/api/ai/chat", {
+      method: "POST",
+      body: JSON.stringify({ message, history })
+    }),
   markNotificationsRead: () => request("/api/notifications/read", { method: "POST" })
 };

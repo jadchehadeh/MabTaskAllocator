@@ -312,7 +312,7 @@ async function ensureTaskChatGroup(taskId) {
 async function deleteTaskChatGroup(taskId) {
   const group = await db.prepare("SELECT id FROM chat_groups WHERE task_id = ?").get(taskId);
   if (!group) return;
-  await db.prepare("DELETE FROM chat_messages WHERE channel_id = ?").run(`group:${group.id}`);
+  await deleteChatMessagesForChannel(`group:${group.id}`);
   await db.prepare("DELETE FROM chat_groups WHERE id = ?").run(group.id);
 }
 
@@ -453,6 +453,71 @@ async function dmContactsFor(actor) {
       `).all(actor.id, actor.department);
 }
 
+async function resolveChatChannel(actor, channelId) {
+  if (channelId.startsWith("department:")) {
+    const department = channelId.slice("department:".length);
+    if (!department) {
+      const error = new Error("Chat channel not found.");
+      error.status = 404;
+      throw error;
+    }
+    if (actor.role !== "superadmin" && actor.department !== department) {
+      const error = new Error("You can chat only inside your own department.");
+      error.status = 403;
+      throw error;
+    }
+    return { department };
+  }
+  if (channelId.startsWith("group:")) {
+    const group = await db.prepare("SELECT department, task_id FROM chat_groups WHERE id = ?").get(channelId.slice("group:".length));
+    if (!group) {
+      const error = new Error("Chat group not found.");
+      error.status = 404;
+      throw error;
+    }
+    if (group.task_id && actor.role === "user" && !(await taskAssigneeIds(group.task_id)).includes(actor.id)) {
+      const error = new Error("This task chat is limited to its assigned workers.");
+      error.status = 403;
+      throw error;
+    }
+    if (actor.role !== "superadmin" && actor.department !== group.department) {
+      const error = new Error("You can chat only inside your own department.");
+      error.status = 403;
+      throw error;
+    }
+    return { department: group.department };
+  }
+  if (channelId.startsWith("dm:")) {
+    const participantIds = channelId.slice("dm:".length).split(":");
+    if (participantIds.length !== 2 || !participantIds.includes(actor.id)) {
+      const error = new Error("You are not part of this conversation.");
+      error.status = 403;
+      throw error;
+    }
+    const otherId = participantIds.find((id) => id !== actor.id);
+    const other = await db.prepare("SELECT * FROM users WHERE id = ?").get(otherId);
+    if (!other) {
+      const error = new Error("This person is no longer available.");
+      error.status = 404;
+      throw error;
+    }
+    if (actor.role !== "superadmin" && !sameDepartment(actor.department, other.department)) {
+      const error = new Error("You can message colleagues in your own department only.");
+      error.status = 403;
+      throw error;
+    }
+    if (channelId !== dmChannelId(actor.id, otherId)) {
+      const error = new Error("Chat channel not found.");
+      error.status = 404;
+      throw error;
+    }
+    return { department: actor.department };
+  }
+  const error = new Error("Chat channel not found.");
+  error.status = 404;
+  throw error;
+}
+
 async function chatDataFor(actor) {
   const departments = actor.role === "superadmin"
     ? (await db.prepare(`
@@ -499,26 +564,78 @@ async function chatDataFor(actor) {
     }))
   ];
   const channelIds = channels.map((channel) => channel.id);
-  const messages = channelIds.length
-    ? (await db.prepare(`
-        SELECT id, channel_id, author_id, author_name, body, created_at FROM (
-          SELECT id, channel_id, author_id, author_name, body, created_at,
-            row_number() OVER (PARTITION BY channel_id ORDER BY created_at DESC) AS rn
-          FROM chat_messages
-          WHERE channel_id IN (${channelIds.map(() => "?").join(",")})
-        ) ranked
-        WHERE rn <= 150
-        ORDER BY created_at ASC
-      `).all(...channelIds)).map((message) => ({
-        id: message.id,
-        channelId: message.channel_id,
-        authorId: message.author_id ?? "deleted-user",
-        authorName: message.author_name,
-        body: message.body,
-        createdAt: formatDate(message.created_at)
-      }))
+  if (!channelIds.length) return { chatChannels: channels, chatMessages: [] };
+
+  const rawMessages = await db.prepare(`
+    SELECT id, channel_id, author_id, author_name, body, reply_to_id, deleted_at, created_at FROM (
+      SELECT id, channel_id, author_id, author_name, body, reply_to_id, deleted_at, created_at,
+        row_number() OVER (PARTITION BY channel_id ORDER BY created_at DESC) AS rn
+      FROM chat_messages
+      WHERE channel_id IN (${channelIds.map(() => "?").join(",")})
+        AND NOT EXISTS (
+          SELECT 1 FROM chat_message_hidden
+          WHERE chat_message_hidden.message_id = chat_messages.id AND chat_message_hidden.user_id = ?
+        )
+    ) ranked
+    WHERE rn <= 150
+    ORDER BY created_at ASC
+  `).all(...channelIds, actor.id);
+
+  const messageIds = rawMessages.map((message) => message.id);
+  const fileRows = messageIds.length
+    ? await db.prepare(`
+        SELECT id, message_id, name, mime_type, size FROM chat_message_files
+        WHERE message_id IN (${messageIds.map(() => "?").join(",")})
+        ORDER BY uploaded_at ASC
+      `).all(...messageIds)
     : [];
-  return { chatChannels: channels, chatMessages: messages };
+  const filesByMessage = new Map();
+  for (const file of fileRows) {
+    const list = filesByMessage.get(file.message_id) ?? [];
+    list.push({ id: file.id, name: file.name, mimeType: file.mime_type ?? "application/octet-stream", size: file.size ?? 0 });
+    filesByMessage.set(file.message_id, list);
+  }
+
+  const loadedIds = new Set(messageIds);
+  const replyPreviewById = new Map();
+  for (const message of rawMessages) {
+    replyPreviewById.set(message.id, { id: message.id, authorName: message.author_name, body: message.deleted_at ? "This message was deleted" : message.body });
+  }
+  const missingReplyIds = [...new Set(
+    rawMessages.map((message) => message.reply_to_id).filter((id) => id && !loadedIds.has(id))
+  )];
+  if (missingReplyIds.length) {
+    const extraReplyRows = await db.prepare(`
+      SELECT id, author_name, body FROM chat_messages WHERE id IN (${missingReplyIds.map(() => "?").join(",")})
+    `).all(...missingReplyIds);
+    for (const row of extraReplyRows) replyPreviewById.set(row.id, { id: row.id, authorName: row.author_name, body: row.body });
+  }
+
+  const reads = await db.prepare("SELECT channel_id, last_read_at FROM chat_reads WHERE user_id = ?").all(actor.id);
+  const lastReadByChannel = new Map(reads.map((row) => [row.channel_id, row.last_read_at]));
+  const unreadByChannel = new Map();
+  for (const message of rawMessages) {
+    if (message.author_id === actor.id) continue;
+    const lastRead = lastReadByChannel.get(message.channel_id);
+    if (!lastRead || message.created_at > lastRead) {
+      unreadByChannel.set(message.channel_id, (unreadByChannel.get(message.channel_id) ?? 0) + 1);
+    }
+  }
+
+  const channelsWithUnread = channels.map((channel) => ({ ...channel, unreadCount: unreadByChannel.get(channel.id) ?? 0 }));
+  const messages = rawMessages.map((message) => ({
+    id: message.id,
+    channelId: message.channel_id,
+    authorId: message.author_id ?? "deleted-user",
+    authorName: message.author_name,
+    body: message.body,
+    isDeleted: Boolean(message.deleted_at),
+    createdAt: formatDate(message.created_at),
+    files: filesByMessage.get(message.id) ?? [],
+    replyTo: message.reply_to_id ? replyPreviewById.get(message.reply_to_id) : undefined
+  }));
+
+  return { chatChannels: channelsWithUnread, chatMessages: messages };
 }
 
 function canManage(user, task) {
@@ -628,6 +745,56 @@ async function saveTaskFiles(taskId, actor, files) {
       try { unlinkSync(join(attachmentsPath, storageName)); } catch { /* Best-effort cleanup. */ }
     }
     throw error;
+  }
+}
+
+async function saveChatMessageFiles(messageId, actor, files) {
+  const incoming = Array.isArray(files) ? files.slice(0, maxFilesPerUpload) : [];
+  if (Array.isArray(files) && files.length > maxFilesPerUpload) {
+    const error = new Error(`You can attach up to ${maxFilesPerUpload} files at once.`);
+    error.status = 400;
+    throw error;
+  }
+
+  const prepared = incoming.map((file) => {
+    const name = basename(String(file.name ?? "attachment")).slice(0, 180);
+    const mimeType = String(file.mimeType ?? "application/octet-stream").slice(0, 120);
+    const data = Buffer.from(String(file.data ?? ""), "base64");
+    if (!name || !data.length) throw new Error("Each attachment must include a name and file content.");
+    if (data.length > maxFileSize) throw new Error(`${name} exceeds the 10 MB file limit.`);
+    return { data, mimeType, name, storageName: `${randomUUID()}${extname(name).slice(0, 12)}` };
+  });
+
+  const writtenFiles = [];
+  try {
+    await db.transaction(async () => {
+      for (const file of prepared) {
+        writeFileSync(join(attachmentsPath, file.storageName), file.data, { flag: "wx" });
+        writtenFiles.push(file.storageName);
+        await db.prepare(`
+          INSERT INTO chat_message_files (id, message_id, name, uploaded_by, storage_name, mime_type, size)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(randomUUID(), messageId, file.name, actor.name, file.storageName, file.mimeType, file.data.length);
+      }
+    });
+  } catch (error) {
+    for (const storageName of writtenFiles) {
+      try { unlinkSync(join(attachmentsPath, storageName)); } catch { /* Best-effort cleanup. */ }
+    }
+    throw error;
+  }
+  return prepared.length;
+}
+
+async function deleteChatMessagesForChannel(channelId) {
+  const files = await db.prepare(`
+    SELECT chat_message_files.storage_name FROM chat_message_files
+    JOIN chat_messages ON chat_messages.id = chat_message_files.message_id
+    WHERE chat_messages.channel_id = ?
+  `).all(channelId);
+  await db.prepare("DELETE FROM chat_messages WHERE channel_id = ?").run(channelId);
+  for (const file of files) {
+    try { unlinkSync(join(attachmentsPath, basename(file.storage_name))); } catch { /* Already absent. */ }
   }
 }
 
@@ -1444,6 +1611,75 @@ const server = createServer(async (request, response) => {
       return send(response, 200, { ok: true });
     }
 
+    if (request.method === "POST" && path === "/api/ai/chat") {
+      const message = String(body.message ?? "").trim().slice(0, 2000);
+      if (!message) throw new Error("Write a message for the AI assistant.");
+      const apiKey = String(process.env.GEMINI_API_KEY ?? "").trim();
+      if (!apiKey) {
+        const rows = await db.prepare(`
+          SELECT tasks.*, projects.name AS project_name
+          FROM tasks LEFT JOIN projects ON projects.id = tasks.project_id
+          ORDER BY tasks.created_at DESC LIMIT 200
+        `).all();
+        const visible = [];
+        for (const task of rows) if (await canView(actor, task)) visible.push(task);
+        const active = visible.filter((task) => task.status !== "done");
+        const overdue = active.filter((task) => task.due_date && task.due_date < new Date().toISOString().slice(0, 10));
+        const review = active.filter((task) => task.status === "under_review");
+        const unassigned = active.filter((task) => !task.assignee_id);
+        const urgent = active.filter((task) => ["urgent", "high"].includes(task.priority));
+        const normalized = message.toLocaleLowerCase();
+        let reply;
+        if (/summar|overview|status|dashboard|how many/.test(normalized)) {
+          reply = `Here is your live workload summary: ${active.length} active task${active.length === 1 ? "" : "s"}, ${urgent.length} high or urgent, ${overdue.length} overdue, ${review.length} awaiting review, and ${unassigned.length} unassigned. ${overdue.length ? "I recommend checking overdue work first, then items waiting for review." : "There are no overdue tasks in your visible workload."}`;
+        } else if (/overdue|late|priority|urgent|focus|today|plan/.test(normalized)) {
+          const focus = [...overdue, ...urgent.filter((task) => !overdue.includes(task))].slice(0, 5);
+          reply = focus.length
+            ? `Suggested focus order:\n${focus.map((task, index) => `${index + 1}. ${task.task_code}: ${task.title} — ${task.priority}${task.due_date ? `, due ${task.due_date}` : ""}`).join("\n")}\nStart with blockers and overdue deadlines, then communicate progress to the task owner.`
+            : "Your visible workload has no overdue or high-priority tasks. Choose the nearest due date, complete one meaningful step, and post a short progress update.";
+        } else if (/write|draft|message|update|email/.test(normalized)) {
+          reply = "Here is a professional update you can adapt:\n\nHello team,\n\nWork is progressing on the assigned item. The current status is [status/progress]. The next action is [next step], planned for [date/time]. The main blocker or decision needed is [blocker/decision].\n\nPlease let me know if priorities have changed.\n\nBest regards,";
+        } else if (/help|what can you do|commands/.test(normalized)) {
+          reply = "I can work offline with your live MAB task data. Try asking: “summarize my workload”, “what should I focus on today?”, “show overdue priorities”, or “draft a professional task update”. Add GEMINI_API_KEY later for open-ended generative answers.";
+        } else {
+          reply = `I'm running in secure offline mode and can analyze the task data available to you. Right now I can see ${active.length} active task${active.length === 1 ? "" : "s"}. Ask me for a workload summary, today's priorities, overdue work, or a drafted status message.`;
+        }
+        return send(response, 200, {
+          configured: false,
+          reply
+        });
+      }
+      const history = Array.isArray(body.history) ? body.history.slice(-10) : [];
+      const contents = history
+        .filter((item) => item && ["user", "assistant"].includes(item.role) && String(item.text ?? "").trim())
+        .map((item) => ({
+          role: item.role === "assistant" ? "model" : "user",
+          parts: [{ text: String(item.text).slice(0, 2000) }]
+        }));
+      contents.push({ role: "user", parts: [{ text: message }] });
+      const model = String(process.env.GEMINI_MODEL ?? "gemini-2.5-flash-lite");
+      const aiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: `You are the MAB Task Allocator assistant. Help ${actor.name}, a ${actor.role} in ${actor.department}, with concise professional guidance about tasks, projects, coordination, and workplace productivity. Never claim to have changed application data. Do not reveal secrets or request passwords.` }]
+          },
+          contents,
+          generationConfig: { temperature: 0.35, maxOutputTokens: 600 }
+        })
+      });
+      const aiPayload = await aiResponse.json().catch(() => ({}));
+      if (!aiResponse.ok) {
+        const providerMessage = aiPayload?.error?.message;
+        return send(response, 502, { message: providerMessage || "The AI provider is temporarily unavailable." });
+      }
+      const reply = aiPayload?.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n").trim();
+      if (!reply) return send(response, 502, { message: "The AI assistant returned an empty response." });
+      await touchSession(request);
+      return send(response, 200, { configured: true, reply });
+    }
+
     if (request.method === "POST" && path === "/api/chat/groups") {
       requireManager(actor);
       const name = String(body.name ?? "").trim().slice(0, 80);
@@ -1480,67 +1716,103 @@ const server = createServer(async (request, response) => {
         return send(response, 403, { message: "Admins can delete group chats in their own department only." });
       }
       const channelId = `group:${group.id}`;
-      await db.transaction(async () => {
-        await db.prepare("DELETE FROM chat_messages WHERE channel_id = ?").run(channelId);
-        await db.prepare("DELETE FROM chat_groups WHERE id = ?").run(group.id);
-      });
+      await deleteChatMessagesForChannel(channelId);
+      await db.prepare("DELETE FROM chat_groups WHERE id = ?").run(group.id);
       await touchSession(request);
       return send(response, 200, { ok: true });
     }
 
     if (request.method === "POST" && path === "/api/chat/messages") {
       const channelId = String(body.channelId ?? "");
-      const message = String(body.body ?? "").trim().slice(0, 2000);
-      if (!message) throw new Error("Message cannot be empty.");
-      let department = "";
-      if (channelId.startsWith("department:")) {
-        department = channelId.slice("department:".length);
-      } else if (channelId.startsWith("group:")) {
-        const group = await db.prepare("SELECT department, task_id FROM chat_groups WHERE id = ?").get(channelId.slice("group:".length));
-        if (!group) return send(response, 404, { message: "Chat group not found." });
-        department = group.department;
-        if (group.task_id && actor.role === "user" && !(await taskAssigneeIds(group.task_id)).includes(actor.id)) {
-          return send(response, 403, { message: "This task chat is limited to its assigned workers." });
-        }
-      } else if (channelId.startsWith("dm:")) {
-        const participantIds = channelId.slice("dm:".length).split(":");
-        if (participantIds.length !== 2 || !participantIds.includes(actor.id)) {
-          return send(response, 403, { message: "You are not part of this conversation." });
-        }
-        const otherId = participantIds.find((id) => id !== actor.id);
-        const other = await db.prepare("SELECT * FROM users WHERE id = ?").get(otherId);
-        if (!other) return send(response, 404, { message: "This person is no longer available." });
-        if (actor.role !== "superadmin" && !sameDepartment(actor.department, other.department)) {
-          return send(response, 403, { message: "You can message colleagues in your own department only." });
-        }
-        if (channelId !== dmChannelId(actor.id, otherId)) {
-          return send(response, 404, { message: "Chat channel not found." });
-        }
-        department = actor.department;
+      const messageBody = String(body.body ?? "").trim().slice(0, 2000);
+      const incomingFiles = Array.isArray(body.files) ? body.files : [];
+      if (!messageBody && !incomingFiles.length) throw new Error("Message cannot be empty.");
+
+      const { department } = await resolveChatChannel(actor, channelId);
+
+      let replyToId = null;
+      if (body.replyToId) {
+        const replySource = await db.prepare("SELECT id, channel_id FROM chat_messages WHERE id = ?").get(String(body.replyToId));
+        if (replySource && replySource.channel_id === channelId) replyToId = replySource.id;
       }
-      if (!department) return send(response, 404, { message: "Chat channel not found." });
-      if (actor.role !== "superadmin" && actor.department !== department) {
-        return send(response, 403, { message: "You can chat only inside your own department." });
-      }
+
+      const messageId = randomUUID();
       await db.prepare(`
-        INSERT INTO chat_messages (id, channel_id, department, author_id, author_name, body)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(randomUUID(), channelId, department, actor.id, actor.name, message);
+        INSERT INTO chat_messages (id, channel_id, department, author_id, author_name, body, reply_to_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(messageId, channelId, department, actor.id, actor.name, messageBody, replyToId);
+      try {
+        await saveChatMessageFiles(messageId, actor, incomingFiles);
+      } catch (error) {
+        await db.prepare("DELETE FROM chat_messages WHERE id = ?").run(messageId);
+        throw error;
+      }
+      const mentionedNames = new Set([...messageBody.matchAll(/@\[([^\]]+)\]/g)].map((match) => match[1].trim().toLocaleLowerCase()));
+      if (mentionedNames.size) {
+        const possibleMentions = await db.prepare("SELECT * FROM users WHERE id != ? ORDER BY name").all(actor.id);
+        for (const mentionedUser of possibleMentions) {
+          if (!mentionedNames.has(mentionedUser.name.trim().toLocaleLowerCase())) continue;
+          try {
+            await resolveChatChannel(mentionedUser, channelId);
+            await notify(mentionedUser.id, "mention", `${actor.name} mentioned you`, messageBody.slice(0, 240));
+          } catch { /* The mentioned user cannot access this conversation. */ }
+        }
+      }
       await touchSession(request);
       return send(response, 201, { ok: true });
+    }
+
+    const chatFileDownloadMatch = path.match(/^\/api\/chat\/files\/([^/]+)\/download$/);
+    if (request.method === "GET" && chatFileDownloadMatch) {
+      const file = await db.prepare(`
+        SELECT chat_message_files.*, chat_messages.channel_id
+        FROM chat_message_files JOIN chat_messages ON chat_messages.id = chat_message_files.message_id
+        WHERE chat_message_files.id = ?
+      `).get(chatFileDownloadMatch[1]);
+      if (!file) return send(response, 404, { message: "File not found." });
+      await resolveChatChannel(actor, file.channel_id);
+      try {
+        const data = readFileSync(join(attachmentsPath, basename(file.storage_name)));
+        return sendBinary(response, 200, data, file.mime_type || "application/octet-stream", file.name);
+      } catch {
+        return send(response, 404, { message: "The stored file could not be found." });
+      }
+    }
+
+    if (request.method === "POST" && path === "/api/chat/read") {
+      const channelId = String(body.channelId ?? "");
+      await resolveChatChannel(actor, channelId);
+      await db.prepare(`
+        INSERT INTO chat_reads (channel_id, user_id, last_read_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT (channel_id, user_id) DO UPDATE SET last_read_at = CURRENT_TIMESTAMP
+      `).run(channelId, actor.id);
+      return send(response, 200, { ok: true });
     }
 
     const chatMessageMatch = path.match(/^\/api\/chat\/messages\/([^/]+)$/);
     if (chatMessageMatch && ["PUT", "DELETE"].includes(request.method)) {
       const message = await db.prepare("SELECT * FROM chat_messages WHERE id = ?").get(chatMessageMatch[1]);
       if (!message) return send(response, 404, { message: "Chat message not found." });
-      if (message.author_id !== actor.id) return send(response, 403, { message: "You can change only your own messages." });
       if (request.method === "PUT") {
+        if (message.author_id !== actor.id) return send(response, 403, { message: "You can change only your own messages." });
+        if (message.deleted_at) return send(response, 409, { message: "A deleted message cannot be edited." });
         const nextBody = String(body.body ?? "").trim().slice(0, 2000);
-        if (!nextBody) throw new Error("Message cannot be empty.");
+        const attachmentCount = (await db.prepare("SELECT count(*) AS count FROM chat_message_files WHERE message_id = ?").get(message.id)).count;
+        if (!nextBody && !attachmentCount) throw new Error("Message cannot be empty.");
         await db.prepare("UPDATE chat_messages SET body = ? WHERE id = ?").run(nextBody, message.id);
       } else {
-        await db.prepare("DELETE FROM chat_messages WHERE id = ?").run(message.id);
+        const scope = body.scope === "everyone" ? "everyone" : "me";
+        if (scope === "everyone") {
+          if (message.author_id !== actor.id) return send(response, 403, { message: "You can delete this message for yourself only." });
+          const files = await db.prepare("SELECT storage_name FROM chat_message_files WHERE message_id = ?").all(message.id);
+          await db.prepare("DELETE FROM chat_message_files WHERE message_id = ?").run(message.id);
+          await db.prepare("UPDATE chat_messages SET body = '', deleted_at = CURRENT_TIMESTAMP WHERE id = ?").run(message.id);
+          for (const file of files) {
+            try { unlinkSync(join(attachmentsPath, basename(file.storage_name))); } catch { /* Already absent. */ }
+          }
+        } else {
+          await db.prepare("INSERT OR IGNORE INTO chat_message_hidden (message_id, user_id) VALUES (?, ?)").run(message.id, actor.id);
+        }
       }
       await touchSession(request);
       return send(response, 200, { ok: true });

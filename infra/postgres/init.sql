@@ -155,8 +155,39 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   department text NOT NULL,
   author_id text REFERENCES users(id) ON DELETE SET NULL,
   author_name text NOT NULL,
-  body text NOT NULL,
+  body text NOT NULL DEFAULT '',
+  reply_to_id text REFERENCES chat_messages(id) ON DELETE SET NULL,
+  deleted_at text,
   created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+);
+
+ALTER TABLE chat_messages ALTER COLUMN body SET DEFAULT '';
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to_id text REFERENCES chat_messages(id) ON DELETE SET NULL;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS deleted_at text;
+
+CREATE TABLE IF NOT EXISTS chat_message_hidden (
+  message_id text NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hidden_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+  PRIMARY KEY (message_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_message_files (
+  id text PRIMARY KEY,
+  message_id text NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  uploaded_by text NOT NULL,
+  uploaded_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+  storage_name text NOT NULL,
+  mime_type text,
+  size integer NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS chat_reads (
+  channel_id text NOT NULL,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  last_read_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+  PRIMARY KEY (channel_id, user_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_department ON tasks(department);
@@ -178,6 +209,9 @@ CREATE INDEX IF NOT EXISTS idx_chat_groups_department ON chat_groups(department,
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_groups_task ON chat_groups(task_id) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_messages_department ON chat_messages(department, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_channel ON chat_messages(channel_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_message_files_message ON chat_message_files(message_id);
+CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads(user_id, channel_id);
+CREATE INDEX IF NOT EXISTS idx_chat_message_hidden_user ON chat_message_hidden(user_id, message_id);
 
 INSERT INTO departments (id, name)
 VALUES
