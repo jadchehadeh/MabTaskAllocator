@@ -441,6 +441,18 @@ async function notifyTaskManagers(task, actorId, title, body) {
   await Promise.all(managers.map((user) => notify(user.id, "claim", title, body, task.id)));
 }
 
+function dmChannelId(firstUserId, secondUserId) {
+  return ["dm", ...[firstUserId, secondUserId].sort()].join(":");
+}
+
+async function dmContactsFor(actor) {
+  return actor.role === "superadmin"
+    ? await db.prepare("SELECT * FROM users WHERE id != ? ORDER BY name").all(actor.id)
+    : await db.prepare(`
+        SELECT * FROM users WHERE id != ? AND lower(trim(department)) = lower(trim(?)) ORDER BY name
+      `).all(actor.id, actor.department);
+}
+
 async function chatDataFor(actor) {
   const departments = actor.role === "superadmin"
     ? (await db.prepare(`
@@ -462,6 +474,7 @@ async function chatDataFor(actor) {
       groups.push(group);
     }
   }
+  const contacts = await dmContactsFor(actor);
   const channels = [
     ...departments.map((department) => ({
       id: `department:${department}`,
@@ -475,17 +488,27 @@ async function chatDataFor(actor) {
       department: group.department,
       isGroup: true,
       taskId: group.task_id ?? undefined
+    })),
+    ...contacts.map((contact) => ({
+      id: dmChannelId(actor.id, contact.id),
+      name: contact.name,
+      department: contact.department,
+      isGroup: false,
+      isDirect: true,
+      participantId: contact.id
     }))
   ];
   const channelIds = channels.map((channel) => channel.id);
   const messages = channelIds.length
     ? (await db.prepare(`
-        SELECT * FROM (
-          SELECT id, channel_id, author_id, author_name, body, created_at
+        SELECT id, channel_id, author_id, author_name, body, created_at FROM (
+          SELECT id, channel_id, author_id, author_name, body, created_at,
+            row_number() OVER (PARTITION BY channel_id ORDER BY created_at DESC) AS rn
           FROM chat_messages
           WHERE channel_id IN (${channelIds.map(() => "?").join(",")})
-          ORDER BY created_at DESC LIMIT 300
-        ) ORDER BY created_at ASC
+        ) ranked
+        WHERE rn <= 150
+        ORDER BY created_at ASC
       `).all(...channelIds)).map((message) => ({
         id: message.id,
         channelId: message.channel_id,
@@ -1479,6 +1502,21 @@ const server = createServer(async (request, response) => {
         if (group.task_id && actor.role === "user" && !(await taskAssigneeIds(group.task_id)).includes(actor.id)) {
           return send(response, 403, { message: "This task chat is limited to its assigned workers." });
         }
+      } else if (channelId.startsWith("dm:")) {
+        const participantIds = channelId.slice("dm:".length).split(":");
+        if (participantIds.length !== 2 || !participantIds.includes(actor.id)) {
+          return send(response, 403, { message: "You are not part of this conversation." });
+        }
+        const otherId = participantIds.find((id) => id !== actor.id);
+        const other = await db.prepare("SELECT * FROM users WHERE id = ?").get(otherId);
+        if (!other) return send(response, 404, { message: "This person is no longer available." });
+        if (actor.role !== "superadmin" && !sameDepartment(actor.department, other.department)) {
+          return send(response, 403, { message: "You can message colleagues in your own department only." });
+        }
+        if (channelId !== dmChannelId(actor.id, otherId)) {
+          return send(response, 404, { message: "Chat channel not found." });
+        }
+        department = actor.department;
       }
       if (!department) return send(response, 404, { message: "Chat channel not found." });
       if (actor.role !== "superadmin" && actor.department !== department) {

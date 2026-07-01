@@ -83,6 +83,8 @@ export type ChatChannel = {
   department: DepartmentName;
   isGroup: boolean;
   taskId?: string;
+  isDirect?: boolean;
+  participantId?: string;
 };
 
 export type ChatMessage = {

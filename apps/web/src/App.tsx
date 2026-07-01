@@ -4,6 +4,7 @@ import {
   Archive,
   Bell,
   Building2,
+  Calendar,
   CheckCircle2,
   ClipboardList,
   Download,
@@ -145,6 +146,14 @@ function identityColor(id?: string | null, currentUserId?: string) {
 
 function sameDepartment(first?: string | null, second?: string | null) {
   return String(first ?? "").trim().toLocaleLowerCase() === String(second ?? "").trim().toLocaleLowerCase();
+}
+
+function initials(name: string) {
+  return name.split(" ").filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "?";
+}
+
+function isTaskOverdue(task: Pick<ManagedTask, "dueDate" | "status">) {
+  return Boolean(task.dueDate && task.status !== "done" && task.dueDate < new Date().toISOString().slice(0, 10));
 }
 
 interface CandidatePickerProps {
@@ -341,6 +350,8 @@ export function App() {
   const [editDraft, setEditDraft] = useState<AppUser | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [taskEditDraft, setTaskEditDraft] = useState<ManagedTask | null>(null);
+  const [assigningTaskId, setAssigningTaskId] = useState<string | null>(null);
+  const [assignDraft, setAssignDraft] = useState<{ assigneeIds: string[]; dueDate: string }>({ assigneeIds: [], dueDate: "" });
   const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
   const [editingTaskMessageId, setEditingTaskMessageId] = useState("");
   const [taskMessageEditDraft, setTaskMessageEditDraft] = useState("");
@@ -589,6 +600,8 @@ export function App() {
     : managerTaskSection === "review"
       ? activeTasks.filter((task) => task.status === "under_review")
       : managerTaskSection === "free" ? freeActiveTasks : activeTasks;
+  const activeSectionUrgentCount = activeTaskSectionTasks.filter((task) => task.priority === "urgent").length;
+  const activeSectionOverdueCount = activeTaskSectionTasks.filter(isTaskOverdue).length;
   const dashboardTasks = currentUser?.role === "user" ? assignedActiveTasks : activeTasks;
 
   const todoLinkableTasks = useMemo(() => activeTasks.filter((task) =>
@@ -768,7 +781,7 @@ export function App() {
       setChatChannels(data.chatChannels);
       setChatMessages(data.chatMessages);
       const departmentChannel = data.chatChannels.find((channel) =>
-        !channel.isGroup && (currentUser?.role === "superadmin" || channel.department === currentUser?.department));
+        !channel.isGroup && !channel.isDirect && (currentUser?.role === "superadmin" || channel.department === currentUser?.department));
       setSelectedChannelId(departmentChannel?.id ?? data.chatChannels[0]?.id ?? "");
     } catch (error) {
       setChatStatus(error instanceof Error ? error.message : "Could not open Department Chat.");
@@ -980,6 +993,7 @@ export function App() {
 
   function startEditTask(task: ManagedTask) {
     if (!canManageTask(task)) return;
+    setAssigningTaskId(null);
     setEditingTaskId(task.id);
     setTaskEditDraft({ ...task, complexity: complexityPoints(task) });
   }
@@ -1040,6 +1054,60 @@ export function App() {
     }
   }
 
+  function directAssignableUsersFor(task: ManagedTask) {
+    const project = projects.find((item) => item.id === task.projectId);
+    return assignableUsers.filter((user) => project
+      ? project.members.some((member) => member.id === user.id)
+      : sameDepartment(user.department, task.department));
+  }
+
+  function startAssignTask(task: ManagedTask) {
+    if (!canManageTask(task)) return;
+    setEditingTaskId(null);
+    setTaskEditDraft(null);
+    setAssigningTaskId(task.id);
+    setAssignDraft({ assigneeIds: task.assigneeIds, dueDate: task.dueDate ?? "" });
+  }
+
+  function cancelAssignTask() {
+    setAssigningTaskId(null);
+    setAssignDraft({ assigneeIds: [], dueDate: "" });
+  }
+
+  async function saveAssignTask(task: ManagedTask) {
+    if (!currentUser || !canManageTask(task)) return;
+
+    const allowedUsers = directAssignableUsersFor(task);
+    const assignees = allowedUsers.filter((user) => assignDraft.assigneeIds.includes(user.id));
+    if (assignees.length !== assignDraft.assigneeIds.length) {
+      setAllocationMessage("Every assignee must be a valid project member in this department.");
+      return;
+    }
+    if (!assignees.length) {
+      setAllocationMessage("Select at least one person to assign.");
+      return;
+    }
+
+    const updatedTask: ManagedTask = {
+      ...task,
+      assigneeId: assignees[0]?.id,
+      assigneeIds: assignees.map((assignee) => assignee.id),
+      candidateName: assignees.map((assignee) => assignee.name).join(", "),
+      candidateNames: assignees.map((assignee) => assignee.name),
+      status: "assigned",
+      dueDate: assignDraft.dueDate
+    };
+
+    try {
+      await api.updateTask(updatedTask);
+      await refreshData(true);
+      cancelAssignTask();
+      setAllocationMessage(`"${task.title}" was assigned to ${assignees.map((assignee) => assignee.name).join(", ")}.`);
+    } catch (error) {
+      setAllocationMessage(error instanceof Error ? error.message : "Could not assign this task.");
+    }
+  }
+
   function deleteTask(task: ManagedTask) {
     if (!canManageTask(task)) return;
     requestConfirmation(`Are you sure you want to delete Task #${task.taskCode} "${task.title}"? Its chat and documents will also be deleted.`, async () => {
@@ -1048,6 +1116,7 @@ export function App() {
         await refreshData(true);
         setEditingTaskId((activeTaskId) => (activeTaskId === task.id ? null : activeTaskId));
         setTaskEditDraft((draft) => (draft?.id === task.id ? null : draft));
+        setAssigningTaskId((activeTaskId) => (activeTaskId === task.id ? null : activeTaskId));
         setAllocationMessage(`"${task.title}" was deleted.`);
       } catch (error) {
         setAllocationMessage(error instanceof Error ? error.message : "Could not delete this task.");
@@ -1393,6 +1462,7 @@ export function App() {
 
   function renderTaskCard(task: ManagedTask, view: "department" | "mine" = "department") {
     const isEditingTask = editingTaskId === task.id && taskEditDraft;
+    const isAssigningTask = assigningTaskId === task.id;
     const canDeleteTask = canManageTask(task);
     const canEditTask = canDeleteTask && task.status !== "done";
     const canClaimTask =
@@ -1415,214 +1485,294 @@ export function App() {
     const taskAssignableUsers = assignableUsers.filter((user) => taskEditProject
       ? taskEditProject.members.some((member) => member.id === user.id)
       : sameDepartment(user.department, taskEditDraft?.department ?? task.department));
+    const overdue = isTaskOverdue(task);
 
     return (
-      <article className="task-card" key={`${view}-${task.id}`}>
-        <div className="task-row task-row-progress">
+      <article className={`task-card task-card-priority-${task.priority}`} key={`${view}-${task.id}`}>
+        <div className="task-row">
           {isEditingTask ? (
-            <div className="edit-task-grid">
-              <input
-                onChange={(event) =>
-                  setTaskEditDraft({ ...taskEditDraft, title: event.target.value })
-                }
-                value={taskEditDraft.title}
-              />
-              <select
-                onChange={(event) => {
-                  const project = projects.find((item) => item.id === event.target.value);
-                  setTaskEditDraft({
-                    ...taskEditDraft,
-                    projectId: project?.id,
-                    projectName: project?.name,
-                    department: project?.department ?? taskEditDraft.department,
-                    assigneeId: undefined,
-                    assigneeIds: [],
-                    candidateName: "Unassigned",
-                    candidateNames: []
-                  });
-                }}
-                value={taskEditDraft.projectId ?? ""}
-              >
-                <option value="">No project</option>
-                {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-              </select>
-              {currentUser?.role === "superadmin" ? (
-                <select
-                  disabled={Boolean(taskEditDraft.projectId)}
-                  onChange={(event) => {
-                    const department = event.target.value as DepartmentName;
+            <div className="edit-task-panel">
+              <div className="edit-task-panel-header">
+                <Edit3 aria-hidden="true" size={16} />
+                <span>Editing Task #{task.taskCode}</span>
+              </div>
+              <div className="edit-task-grid">
+                <label className="task-field-label edit-task-grid-full">Title
+                  <input
+                    onChange={(event) =>
+                      setTaskEditDraft({ ...taskEditDraft, title: event.target.value })
+                    }
+                    value={taskEditDraft.title}
+                  />
+                </label>
+                <label className="task-field-label">Project
+                  <select
+                    onChange={(event) => {
+                      const project = projects.find((item) => item.id === event.target.value);
+                      setTaskEditDraft({
+                        ...taskEditDraft,
+                        projectId: project?.id,
+                        projectName: project?.name,
+                        department: project?.department ?? taskEditDraft.department,
+                        assigneeId: undefined,
+                        assigneeIds: [],
+                        candidateName: "Unassigned",
+                        candidateNames: []
+                      });
+                    }}
+                    value={taskEditDraft.projectId ?? ""}
+                  >
+                    <option value="">No project</option>
+                    {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                  </select>
+                </label>
+                {currentUser?.role === "superadmin" ? (
+                  <label className="task-field-label">Department
+                    <select
+                      disabled={Boolean(taskEditDraft.projectId)}
+                      onChange={(event) => {
+                        const department = event.target.value as DepartmentName;
 
-                    setTaskEditDraft({
-                      ...taskEditDraft,
-                      department,
-                      assigneeId: undefined,
-                      assigneeIds: [],
-                      candidateName: "Unassigned",
-                      candidateNames: []
-                    });
+                        setTaskEditDraft({
+                          ...taskEditDraft,
+                          department,
+                          assigneeId: undefined,
+                          assigneeIds: [],
+                          candidateName: "Unassigned",
+                          candidateNames: []
+                        });
+                      }}
+                      value={taskEditDraft.department}
+                    >
+                      {departments.map((department) => (
+                        <option key={department} value={department}>{department}</option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                <label className="task-field-label edit-task-grid-full">Assignees
+                  <select
+                    multiple
+                    onChange={(event) => {
+                      const assigneeIds = Array.from(event.target.selectedOptions).map((option) => option.value);
+                      const assignees = users.filter((user) => assigneeIds.includes(user.id));
+
+                      setTaskEditDraft({
+                        ...taskEditDraft,
+                        assigneeId: assigneeIds[0],
+                        assigneeIds,
+                        candidateName: assignees.map((assignee) => assignee.name).join(", ") || "Unassigned",
+                        candidateNames: assignees.map((assignee) => assignee.name)
+                      });
+                    }}
+                    size={Math.min(5, Math.max(2, taskAssignableUsers.length))}
+                    value={taskEditDraft.assigneeIds}
+                  >
+                    {taskAssignableUsers.map((user) => (
+                      <option key={user.id} value={user.id}>{user.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="task-field-label">Task type
+                  <select onChange={(event) => setTaskEditDraft({ ...taskEditDraft, taskType: event.target.value as TaskType })} value={taskEditDraft.taskType}>
+                    {taskTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+                  </select>
+                </label>
+                <label className="task-field-label">Priority
+                  <select
+                    onChange={(event) =>
+                      setTaskEditDraft({
+                        ...taskEditDraft,
+                        priority: event.target.value as TaskPriority
+                      })
+                    }
+                    value={taskEditDraft.priority}
+                  >
+                    <option value="low">Low priority</option>
+                    <option value="medium">Medium priority</option>
+                    <option value="high">High priority</option>
+                    <option value="urgent">Urgent priority</option>
+                  </select>
+                </label>
+                <label className="task-field-label">Status
+                  <select
+                    onChange={(event) =>
+                      setTaskEditDraft({
+                        ...taskEditDraft,
+                        status: event.target.value as TaskStatus
+                      })
+                    }
+                    value={taskEditDraft.status}
+                  >
+                    <option value="new">New</option>
+                    <option value="assigned">Assigned</option>
+                    <option value="in_progress">In Progress</option>
+                    <option value="blocked">Blocked</option>
+                    <option value="under_review">Under Review</option>
+                    <option value="done">Done</option>
+                  </select>
+                </label>
+                <label className="task-field-label">Complexity
+                  <select onChange={(event) => setTaskEditDraft({ ...taskEditDraft, complexity: Number(event.target.value) })} value={taskEditDraft.complexity}>
+                    {[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value} / 5 · {complexityLabels[value]}</option>)}
+                  </select>
+                </label>
+                <label className="task-field-label">Due date
+                  <input
+                    disabled={!taskEditDraft.assigneeIds.length}
+                    onChange={(event) =>
+                      setTaskEditDraft({ ...taskEditDraft, dueDate: event.target.value })
+                    }
+                    type="date"
+                    value={taskEditDraft.dueDate}
+                  />
+                </label>
+                <label className="task-field-label">Progress (%)
+                  <input
+                    disabled={!taskEditDraft.assigneeIds.length}
+                    max="100"
+                    min="0"
+                    onChange={(event) =>
+                      setTaskEditDraft({
+                        ...taskEditDraft,
+                        progress: clampProgress(Number(event.target.value))
+                      })
+                    }
+                    type="number"
+                    value={taskEditDraft.progress}
+                  />
+                </label>
+              </div>
+              <div className="edit-task-panel-actions">
+                <button type="button" className="task-action-button" onClick={saveEditTask}>
+                  <Save aria-hidden="true" size={16} />
+                  Save Changes
+                </button>
+                <button
+                  type="button"
+                  className="task-action-button secondary"
+                  onClick={() => {
+                    setEditingTaskId(null);
+                    setTaskEditDraft(null);
                   }}
-                  value={taskEditDraft.department}
                 >
-                  {departments.map((department) => (
-                    <option key={department} value={department}>{department}</option>
-                  ))}
-                </select>
-              ) : null}
-              <select
-                multiple
-                onChange={(event) => {
-                  const assigneeIds = Array.from(event.target.selectedOptions).map((option) => option.value);
-                  const assignees = users.filter((user) => assigneeIds.includes(user.id));
-
-                  setTaskEditDraft({
-                    ...taskEditDraft,
-                    assigneeId: assigneeIds[0],
-                    assigneeIds,
-                    candidateName: assignees.map((assignee) => assignee.name).join(", ") || "Unassigned",
-                    candidateNames: assignees.map((assignee) => assignee.name)
-                  });
-                }}
-                size={Math.min(5, Math.max(2, taskAssignableUsers.length))}
-                value={taskEditDraft.assigneeIds}
-              >
-                {taskAssignableUsers.map((user) => (
-                  <option key={user.id} value={user.id}>{user.name}</option>
-                ))}
-              </select>
-              <select onChange={(event) => setTaskEditDraft({ ...taskEditDraft, taskType: event.target.value as TaskType })} value={taskEditDraft.taskType}>
-                {taskTypes.map((type) => <option key={type} value={type}>{type}</option>)}
-              </select>
-              <select
-                onChange={(event) =>
-                  setTaskEditDraft({
-                    ...taskEditDraft,
-                    priority: event.target.value as TaskPriority
-                  })
-                }
-                value={taskEditDraft.priority}
-              >
-                <option value="low">Low priority</option>
-                <option value="medium">Medium priority</option>
-                <option value="high">High priority</option>
-                <option value="urgent">Urgent priority</option>
-              </select>
-              <select
-                onChange={(event) =>
-                  setTaskEditDraft({
-                    ...taskEditDraft,
-                    status: event.target.value as TaskStatus
-                  })
-                }
-                value={taskEditDraft.status}
-              >
-                <option value="new">New</option>
-                <option value="assigned">Assigned</option>
-                <option value="in_progress">In Progress</option>
-                <option value="blocked">Blocked</option>
-                <option value="under_review">Under Review</option>
-                <option value="done">Done</option>
-              </select>
-              <label className="task-field-label">Complexity
-                <select onChange={(event) => setTaskEditDraft({ ...taskEditDraft, complexity: Number(event.target.value) })} value={taskEditDraft.complexity}>
-                  {[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value} / 5 · {complexityLabels[value]}</option>)}
-                </select>
+                  <X aria-hidden="true" size={16} />
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : isAssigningTask ? (
+            <div className="quick-assign-panel">
+              <div className="edit-task-panel-header">
+                <UserPlus aria-hidden="true" size={16} />
+                <span>Assign Task #{task.taskCode} · {task.title}</span>
+              </div>
+              <CandidatePicker
+                candidates={directAssignableUsersFor(task)}
+                emptyMessage="No eligible users are available in this department yet."
+                onChange={(ids) => setAssignDraft((draft) => ({ ...draft, assigneeIds: ids }))}
+                selectedIds={assignDraft.assigneeIds}
+              />
+              <label className="task-field-label quick-assign-due">Due date (optional)
+                <input
+                  onChange={(event) => setAssignDraft((draft) => ({ ...draft, dueDate: event.target.value }))}
+                  type="date"
+                  value={assignDraft.dueDate}
+                />
               </label>
-              <input
-                disabled={!taskEditDraft.assigneeIds.length}
-                onChange={(event) =>
-                  setTaskEditDraft({ ...taskEditDraft, dueDate: event.target.value })
-                }
-                type="date"
-                value={taskEditDraft.dueDate}
-              />
-              <input
-                disabled={!taskEditDraft.assigneeIds.length}
-                max="100"
-                min="0"
-                onChange={(event) =>
-                  setTaskEditDraft({
-                    ...taskEditDraft,
-                    progress: clampProgress(Number(event.target.value))
-                  })
-                }
-                type="number"
-                value={taskEditDraft.progress}
-              />
+              <div className="edit-task-panel-actions">
+                <button
+                  type="button"
+                  className="task-action-button"
+                  disabled={!assignDraft.assigneeIds.length}
+                  onClick={() => saveAssignTask(task)}
+                >
+                  <CheckCircle2 aria-hidden="true" size={16} />
+                  Assign Task
+                </button>
+                <button type="button" className="task-action-button secondary" onClick={cancelAssignTask}>
+                  <X aria-hidden="true" size={16} />
+                  Cancel
+                </button>
+              </div>
             </div>
           ) : (
-            <>
-              <div>
-                <div className="task-title-line"><span className="task-code">Task #{task.taskCode}</span><strong>{task.title}</strong></div>
-                <p>{task.department} · {task.startedAt ? `Started ${new Date(task.startedAt).toLocaleDateString("en-GB")}` : "Not started"} · {task.dueDate ? `Due ${task.dueDate}` : "No planned due date"}</p>
-                {task.reviewComment ? <p className="review-note">Review: {task.reviewComment}</p> : null}
-                <div className="task-progress">
-                  <span style={{ width: `${task.progress}%` }} />
-                </div>
-              </div>
-              <div className="task-meta">
+            <div className="task-card-body">
+              <div className="task-card-heading">
+                <span className="task-code">#{task.taskCode}</span>
+                <span className={`status-pill status-${task.status}`}>{statusLabels[task.status]}</span>
                 <span className={`priority priority-${task.priority}`}>
                   {priorityLabels[task.priority]}
                 </span>
-                <span>{statusLabels[task.status]}</span>
-                <span>{task.taskType}</span>
-                <span>Complexity: {complexityPoints(task)}/5</span>
-                {task.projectName ? <span>Project: {task.projectName}</span> : null}
-                <span>Assigned: {task.candidateName ?? "Unassigned"}</span>
-                <span>{task.progress}%</span>
+                {overdue ? (
+                  <span className="overdue-pill"><AlertTriangle aria-hidden="true" size={12} />Overdue</span>
+                ) : null}
               </div>
-            </>
+              <h3 className="task-card-title">{task.title}</h3>
+              {task.reviewComment ? <p className="review-note">Review: {task.reviewComment}</p> : null}
+              <div className="task-card-meta">
+                <span className="meta-item"><Building2 aria-hidden="true" size={13} />{task.department}</span>
+                <span className="meta-item"><FolderKanban aria-hidden="true" size={13} />{task.projectName ?? "No project"}</span>
+                <span className="meta-item"><ListTodo aria-hidden="true" size={13} />{task.taskType}</span>
+                <span className="meta-item" title={complexityLabels[complexityPoints(task)]}><Gauge aria-hidden="true" size={13} />Complexity {complexityPoints(task)}/5</span>
+                <span className="meta-item">{task.startedAt ? `Started ${new Date(task.startedAt).toLocaleDateString("en-GB")}` : "Not started"}</span>
+                <span className={`meta-item ${overdue ? "meta-item-overdue" : ""}`}>
+                  <Calendar aria-hidden="true" size={13} />
+                  {task.dueDate ? `Due ${task.dueDate}` : "No due date"}
+                </span>
+              </div>
+              <div className="task-card-footer">
+                <div className="task-progress-wrap">
+                  <div className="task-progress">
+                    <span style={{ width: `${task.progress}%` }} />
+                  </div>
+                  <b className="task-progress-value">{task.progress}%</b>
+                </div>
+                <div className="task-card-people">
+                  {task.assigneeIds.length ? task.assigneeIds.map((assigneeId, index) => (
+                    <span className="assignee-chip" key={assigneeId}>
+                      <span className="assignee-avatar" style={{ background: identityColor(assigneeId, currentUser?.id) }}>
+                        {initials(task.candidateNames[index] ?? "?")}
+                      </span>
+                      {task.candidateNames[index]}
+                    </span>
+                  )) : (
+                    <span className="assignee-chip unassigned"><Hand aria-hidden="true" size={13} />Unassigned</span>
+                  )}
+                </div>
+              </div>
+            </div>
           )}
 
-          {canEditTask || canDeleteTask || canClaimTask || canSubmitForReview || canReviewClaim ? (
+          {(canEditTask || canDeleteTask || canClaimTask || canSubmitForReview || canReviewClaim) && !isEditingTask && !isAssigningTask ? (
             <div className="row-actions task-actions">
-              {isEditingTask ? (
+              {canClaimTask ? (
+                <button type="button" className="task-action-button" onClick={() => confirmTaskClaim(task)}>
+                  <Hand aria-hidden="true" size={16} />
+                  Request to Take
+                </button>
+              ) : null}
+              {canReviewClaim ? <>
+                <button type="button" className="task-action-button" onClick={() => reviewTaskClaim(task, true)}><CheckCircle2 aria-hidden="true" size={16} />Approve Claim</button>
+                <button type="button" className="task-action-button secondary" onClick={() => reviewTaskClaim(task, false)}><X aria-hidden="true" size={16} />Reject</button>
+              </> : null}
+              {canSubmitForReview ? (
+                <button type="button" className="task-action-button" onClick={() => confirmFinishTask(task)}>
+                  <CheckCircle2 aria-hidden="true" size={16} />
+                  Finish Task
+                </button>
+              ) : null}
+              {canEditTask ? (
                 <>
-                  <button type="button" className="icon-button" onClick={saveEditTask} aria-label="Save task">
-                    <Save aria-hidden="true" size={16} />
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-button"
-                    onClick={() => {
-                      setEditingTaskId(null);
-                      setTaskEditDraft(null);
-                    }}
-                    aria-label="Cancel task edit"
-                  >
-                    <X aria-hidden="true" size={16} />
-                  </button>
+                  {canDirectAssign ? <button type="button" className="task-action-button secondary" onClick={() => startAssignTask(task)}><UserPlus aria-hidden="true" size={16} />Assign User</button> : null}
+                  <button type="button" className="task-action-button secondary" onClick={() => startEditTask(task)}><Edit3 aria-hidden="true" size={16} />Edit</button>
                 </>
-              ) : (
-                <>
-                  {canClaimTask ? (
-                    <button type="button" className="task-action-button" onClick={() => confirmTaskClaim(task)}>
-                      <Hand aria-hidden="true" size={16} />
-                      Request to Take
-                    </button>
-                  ) : null}
-                  {canReviewClaim ? <>
-                    <button type="button" className="task-action-button" onClick={() => reviewTaskClaim(task, true)}><CheckCircle2 aria-hidden="true" size={16} />Approve Claim</button>
-                    <button type="button" className="task-action-button secondary" onClick={() => reviewTaskClaim(task, false)}><X aria-hidden="true" size={16} />Reject</button>
-                  </> : null}
-                  {canSubmitForReview ? (
-                    <button type="button" className="task-action-button" onClick={() => confirmFinishTask(task)}>
-                      <CheckCircle2 aria-hidden="true" size={16} />
-                      Finish Task
-                    </button>
-                  ) : null}
-                  {canEditTask ? (
-                    <>
-                      {canDirectAssign ? <button type="button" className="task-action-button secondary" onClick={() => startEditTask(task)}><UserPlus aria-hidden="true" size={16} />Assign User</button> : null}
-                      <button type="button" className="icon-button" onClick={() => startEditTask(task)} aria-label="Edit task"><Edit3 aria-hidden="true" size={16} /></button>
-                    </>
-                  ) : null}
-                  {canDeleteTask ? (
-                    <button type="button" className="icon-button danger" onClick={() => deleteTask(task)} aria-label="Delete task">
-                      <Trash2 aria-hidden="true" size={16} />
-                    </button>
-                  ) : null}
-                </>
-              )}
+              ) : null}
+              {canDeleteTask ? (
+                <button type="button" className="icon-button danger" onClick={() => deleteTask(task)} aria-label="Delete task">
+                  <Trash2 aria-hidden="true" size={16} />
+                </button>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -1685,32 +1835,40 @@ export function App() {
               <strong>Task Chat</strong>
             </div>
             <div className="task-message-list" tabIndex={0} aria-label={`Comments for Task ${task.taskCode}`}>
-              {task.messages.length ? task.messages.map((message) => (
-                  <article className="task-comment" key={message.id}>
-                    <div className="message-heading">
-                      <strong style={{ color: identityColor(message.authorId, currentUser?.id) }}>{message.authorName}</strong>
-                      <span>{message.createdAt}</span>
-                    </div>
-                    {editingTaskMessageId === message.id ? (
-                      <div className="message-edit-form">
-                        <input
-                          autoFocus
-                          maxLength={2000}
-                          onChange={(event) => setTaskMessageEditDraft(event.target.value)}
-                          value={taskMessageEditDraft}
-                        />
-                        <button className="icon-button" onClick={() => saveTaskMessage(task, message.id)} type="button" aria-label="Save comment"><Save aria-hidden="true" size={15} /></button>
-                        <button className="icon-button" onClick={() => { setEditingTaskMessageId(""); setTaskMessageEditDraft(""); }} type="button" aria-label="Cancel editing"><X aria-hidden="true" size={15} /></button>
+              {task.messages.length ? task.messages.map((message) => {
+                  const mine = message.authorId === currentUser?.id;
+                  return (
+                    <article className={`task-comment ${mine ? "mine" : ""}`} key={message.id}>
+                      <span className="task-comment-avatar" style={{ background: identityColor(message.authorId, currentUser?.id) }}>
+                        {initials(message.authorName)}
+                      </span>
+                      <div className="task-comment-bubble">
+                        <div className="message-heading">
+                          <strong style={{ color: identityColor(message.authorId, currentUser?.id) }}>{message.authorName}</strong>
+                          <span>{message.createdAt}</span>
+                        </div>
+                        {editingTaskMessageId === message.id ? (
+                          <div className="message-edit-form">
+                            <input
+                              autoFocus
+                              maxLength={2000}
+                              onChange={(event) => setTaskMessageEditDraft(event.target.value)}
+                              value={taskMessageEditDraft}
+                            />
+                            <button className="icon-button" onClick={() => saveTaskMessage(task, message.id)} type="button" aria-label="Save comment"><Save aria-hidden="true" size={15} /></button>
+                            <button className="icon-button" onClick={() => { setEditingTaskMessageId(""); setTaskMessageEditDraft(""); }} type="button" aria-label="Cancel editing"><X aria-hidden="true" size={15} /></button>
+                          </div>
+                        ) : <p>{message.body}</p>}
+                        {mine && editingTaskMessageId !== message.id ? (
+                          <div className="message-actions">
+                            <button onClick={() => { setEditingTaskMessageId(message.id); setTaskMessageEditDraft(message.body); }} type="button"><Edit3 aria-hidden="true" size={13} />Edit</button>
+                            <button className="danger" onClick={() => deleteTaskMessage(task, message.id)} type="button"><Trash2 aria-hidden="true" size={13} />Delete</button>
+                          </div>
+                        ) : null}
                       </div>
-                    ) : <p>{message.body}</p>}
-                    {message.authorId === currentUser?.id && editingTaskMessageId !== message.id ? (
-                      <div className="message-actions">
-                        <button onClick={() => { setEditingTaskMessageId(message.id); setTaskMessageEditDraft(message.body); }} type="button"><Edit3 aria-hidden="true" size={13} />Edit</button>
-                        <button className="danger" onClick={() => deleteTaskMessage(task, message.id)} type="button"><Trash2 aria-hidden="true" size={13} />Delete</button>
-                      </div>
-                    ) : null}
-                  </article>
-                )) : <p>No comments yet.</p>}
+                    </article>
+                  );
+                }) : <p className="empty-state">No comments yet. Start the discussion.</p>}
             </div>
             {taskMessageStatus[task.id] ? <p className="conversation-status">{taskMessageStatus[task.id]}</p> : null}
             {task.status !== "done" ? (
@@ -1799,6 +1957,42 @@ export function App() {
         onLogin={handleLogin}
         onToggleTheme={toggleTheme}
       />
+    );
+  }
+
+  const departmentChatChannels = chatChannels.filter((channel) => !channel.isGroup && !channel.isDirect);
+  const groupChatChannels = chatChannels.filter((channel) => channel.isGroup);
+  const directChatChannels = chatChannels.filter((channel) => channel.isDirect);
+  const lastMessageByChannel = new Map<string, ChatMessage>();
+  for (const message of chatMessages) lastMessageByChannel.set(message.channelId, message);
+
+  function renderChatChannelButton(channel: ChatChannel) {
+    const preview = lastMessageByChannel.get(channel.id);
+    const previewText = preview
+      ? `${preview.authorId === currentUser?.id ? "You: " : ""}${preview.body}`
+      : channel.isDirect ? "No messages yet" : channel.isGroup ? "Group chat" : "Broadcast to the whole department";
+
+    return (
+      <button
+        className={channel.id === selectedChannelId ? "active" : ""}
+        key={channel.id}
+        onClick={() => setSelectedChannelId(channel.id)}
+        type="button"
+      >
+        {channel.isDirect ? (
+          <span className="chat-channel-avatar" style={{ background: identityColor(channel.participantId, currentUser?.id) }}>
+            {initials(channel.name)}
+          </span>
+        ) : channel.isGroup ? (
+          <Users aria-hidden="true" size={16} />
+        ) : (
+          <MessageSquare aria-hidden="true" size={16} />
+        )}
+        <span>
+          <strong>{channel.name}</strong>
+          <small>{previewText}</small>
+        </span>
+      </button>
     );
   }
 
@@ -2595,7 +2789,14 @@ export function App() {
               </nav>
             )}
             <div className="active-queue-heading">
-              <div><strong>{currentUser.role === "user" ? activeTaskSection === "free" ? "Available tasks" : "Your workload" : managerTaskSection === "review" ? "Review queue" : managerTaskSection === "free" ? "Unassigned work" : "Current work"}</strong><span>Sorted by priority and due date</span></div>
+              <div>
+                <strong>{currentUser.role === "user" ? activeTaskSection === "free" ? "Available tasks" : "Your workload" : managerTaskSection === "review" ? "Review queue" : managerTaskSection === "free" ? "Unassigned work" : "Current work"}</strong>
+                <span>
+                  Sorted by priority and due date
+                  {activeSectionUrgentCount ? <span className="queue-flag queue-flag-urgent">{activeSectionUrgentCount} urgent</span> : null}
+                  {activeSectionOverdueCount ? <span className="queue-flag queue-flag-overdue">{activeSectionOverdueCount} overdue</span> : null}
+                </span>
+              </div>
               {canAllocateTasks ? <button className="primary-button" onClick={() => setShowTaskComposer(true)} type="button"><Plus aria-hidden="true" size={16} />New Task</button> : null}
             </div>
             <div className="task-list">
@@ -2770,7 +2971,7 @@ export function App() {
           <section className="panel chat-panel" id="department-chat">
             <div className="panel-header">
               <div>
-                <p>{selectedChatChannel?.department ?? currentUser.department}</p>
+                <p>{selectedChatChannel?.isDirect ? `Private message · ${selectedChatChannel.department}` : selectedChatChannel?.department ?? currentUser.department}</p>
                 <h2>{selectedChatChannel?.name ?? "Department Chat"}</h2>
               </div>
               {canManagePeople ? (
@@ -2860,54 +3061,64 @@ export function App() {
 
             <div className="chat-layout">
               <aside className="chat-channel-list" aria-label="Chat channels">
-                {chatChannels.map((channel) => (
-                  <button
-                    className={channel.id === selectedChannelId ? "active" : ""}
-                    key={channel.id}
-                    onClick={() => setSelectedChannelId(channel.id)}
-                    type="button"
-                  >
-                    <MessageSquare aria-hidden="true" size={16} />
-                    <span>
-                      <strong>{channel.name}</strong>
-                      <small>{channel.department}{channel.isGroup ? " · Group" : ""}</small>
-                    </span>
-                  </button>
-                ))}
+                <p className="chat-channel-section-label">Department</p>
+                {departmentChatChannels.map((channel) => renderChatChannelButton(channel))}
+                {groupChatChannels.length ? (
+                  <>
+                    <p className="chat-channel-section-label">Groups</p>
+                    {groupChatChannels.map((channel) => renderChatChannelButton(channel))}
+                  </>
+                ) : null}
+                {directChatChannels.length ? (
+                  <>
+                    <p className="chat-channel-section-label">Direct Messages</p>
+                    {directChatChannels.map((channel) => renderChatChannelButton(channel))}
+                  </>
+                ) : null}
               </aside>
 
               <div className="chat-room">
                 <div className="chat-message-list" aria-live="polite">
-                  {selectedChatMessages.length ? selectedChatMessages.map((message) => (
-                    <article
-                      className={message.authorId === currentUser.id ? "chat-message mine" : "chat-message"}
-                      key={message.id}
-                    >
-                      <div>
-                        <strong style={{ color: identityColor(message.authorId, currentUser.id) }}>{message.authorName}</strong>
-                        <span>{message.createdAt}</span>
-                      </div>
-                      {editingChatMessageId === message.id ? (
-                        <div className="message-edit-form chat-message-edit">
-                          <input
-                            autoFocus
-                            maxLength={2000}
-                            onChange={(event) => setChatMessageEditDraft(event.target.value)}
-                            value={chatMessageEditDraft}
-                          />
-                          <button className="icon-button" onClick={() => saveChatMessage(message.id)} type="button" aria-label="Save message"><Save aria-hidden="true" size={15} /></button>
-                          <button className="icon-button" onClick={() => { setEditingChatMessageId(""); setChatMessageEditDraft(""); }} type="button" aria-label="Cancel editing"><X aria-hidden="true" size={15} /></button>
+                  {selectedChatMessages.length ? selectedChatMessages.map((message) => {
+                    const mine = message.authorId === currentUser.id;
+                    return (
+                      <article
+                        className={mine ? "chat-message mine" : "chat-message"}
+                        key={message.id}
+                      >
+                        <span className="chat-message-avatar" style={{ background: identityColor(message.authorId, currentUser.id) }}>
+                          {initials(message.authorName)}
+                        </span>
+                        <div className="chat-message-bubble">
+                          <div>
+                            <strong style={{ color: identityColor(message.authorId, currentUser.id) }}>{message.authorName}</strong>
+                            <span>{message.createdAt}</span>
+                          </div>
+                          {editingChatMessageId === message.id ? (
+                            <div className="message-edit-form chat-message-edit">
+                              <input
+                                autoFocus
+                                maxLength={2000}
+                                onChange={(event) => setChatMessageEditDraft(event.target.value)}
+                                value={chatMessageEditDraft}
+                              />
+                              <button className="icon-button" onClick={() => saveChatMessage(message.id)} type="button" aria-label="Save message"><Save aria-hidden="true" size={15} /></button>
+                              <button className="icon-button" onClick={() => { setEditingChatMessageId(""); setChatMessageEditDraft(""); }} type="button" aria-label="Cancel editing"><X aria-hidden="true" size={15} /></button>
+                            </div>
+                          ) : <p>{message.body}</p>}
+                          {mine && editingChatMessageId !== message.id ? (
+                            <div className="message-actions">
+                              <button onClick={() => { setEditingChatMessageId(message.id); setChatMessageEditDraft(message.body); }} type="button"><Edit3 aria-hidden="true" size={13} />Edit</button>
+                              <button className="danger" onClick={() => deleteChatMessage(message.id)} type="button"><Trash2 aria-hidden="true" size={13} />Delete</button>
+                            </div>
+                          ) : null}
                         </div>
-                      ) : <p>{message.body}</p>}
-                      {message.authorId === currentUser.id && editingChatMessageId !== message.id ? (
-                        <div className="message-actions">
-                          <button onClick={() => { setEditingChatMessageId(message.id); setChatMessageEditDraft(message.body); }} type="button"><Edit3 aria-hidden="true" size={13} />Edit</button>
-                          <button className="danger" onClick={() => deleteChatMessage(message.id)} type="button"><Trash2 aria-hidden="true" size={13} />Delete</button>
-                        </div>
-                      ) : null}
-                    </article>
-                  )) : (
-                    <p className="empty-state">No messages yet. Say hello to your department.</p>
+                      </article>
+                    );
+                  }) : (
+                    <p className="empty-state">
+                      {selectedChatChannel?.isDirect ? `No messages yet. Say hello to ${selectedChatChannel.name}.` : "No messages yet. Say hello to your department."}
+                    </p>
                   )}
                 </div>
                 <form className="chat-compose" onSubmit={sendDepartmentMessage}>
