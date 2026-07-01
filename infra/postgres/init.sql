@@ -51,7 +51,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   project_id text REFERENCES projects(id) ON DELETE SET NULL,
   task_type text NOT NULL DEFAULT 'Technical',
   task_code text,
-  due_date text NOT NULL,
+  due_date text,
+  complexity integer NOT NULL DEFAULT 3 CHECK (complexity BETWEEN 1 AND 5),
+  started_at text,
+  claim_requested_by_id text REFERENCES users(id) ON DELETE SET NULL,
+  claim_requested_at text,
   progress integer NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
   review_comment text,
   completed_at text,
@@ -65,6 +69,22 @@ CREATE TABLE IF NOT EXISTS task_assignees (
   user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   PRIMARY KEY (task_id, user_id)
 );
+
+ALTER TABLE tasks ALTER COLUMN due_date DROP NOT NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS complexity integer NOT NULL DEFAULT 3;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at text;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claim_requested_by_id text REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claim_requested_at text;
+DO $$ BEGIN
+  ALTER TABLE tasks ADD CONSTRAINT tasks_complexity_check CHECK (complexity BETWEEN 1 AND 5);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+UPDATE tasks SET complexity = 3 WHERE complexity IS NULL OR complexity < 1 OR complexity > 5;
+UPDATE tasks SET started_at = created_at
+WHERE started_at IS NULL AND EXISTS (SELECT 1 FROM task_assignees WHERE task_assignees.task_id = tasks.id);
+UPDATE tasks SET due_date = NULL, started_at = NULL
+WHERE status != 'done' AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_assignees.task_id = tasks.id);
 
 CREATE TABLE IF NOT EXISTS task_worker_approvals (
   task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,

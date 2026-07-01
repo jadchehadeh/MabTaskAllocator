@@ -186,6 +186,9 @@ async function serializeTask(row) {
     WHERE task_worker_approvals.task_id = ? ORDER BY task_worker_approvals.approved_at
   `).all(row.id);
   const approvedIds = approvals.map((approval) => approval.id);
+  const claimRequester = row.claim_requested_by_id
+    ? await db.prepare("SELECT id, name FROM users WHERE id = ? AND role = 'user'").get(row.claim_requested_by_id)
+    : null;
   const files = (await db.prepare(`
     SELECT id, name, uploaded_by, uploaded_at, mime_type, size FROM task_files
     WHERE task_id = ? ORDER BY uploaded_at ASC
@@ -211,10 +214,17 @@ async function serializeTask(row) {
     candidateNames: assignees.map((assignee) => assignee.name),
     workerApprovals: approvals.map((approval) => ({ id: approval.id, name: approval.name, approvedAt: isoDateTime(approval.approved_at) })),
     pendingApprovalNames: assignees.filter((assignee) => !approvedIds.includes(assignee.id)).map((assignee) => assignee.name),
+    claimRequest: claimRequester ? {
+      userId: claimRequester.id,
+      userName: claimRequester.name,
+      requestedAt: isoDateTime(row.claim_requested_at)
+    } : undefined,
     projectId: row.project_id ?? undefined,
     projectName: row.project_name ?? undefined,
     taskType: row.task_type ?? "Technical",
-    dueDate: row.due_date,
+    complexity: normalizeComplexity(row.complexity),
+    startedAt: isoDateTime(row.started_at),
+    dueDate: row.due_date ?? "",
     progress: row.progress,
     reviewComment: row.review_comment ?? undefined,
     completedAt: formatDate(row.completed_at),
@@ -283,6 +293,10 @@ async function generateTaskCode(projectName, department) {
   return `${prefix}-${String(number).padStart(2, "0")}`;
 }
 
+function normalizeComplexity(value) {
+  return Math.min(5, Math.max(1, Math.round(Number(value) || 3)));
+}
+
 async function ensureTaskChatGroup(taskId) {
   const task = await db.prepare("SELECT id, task_code, department FROM tasks WHERE id = ?").get(taskId);
   if (!task || (await taskAssigneeIds(taskId)).length < 2) return;
@@ -319,6 +333,8 @@ async function setTaskAssignees(taskId, assigneeIds) {
     `).run(taskId, ...assigneeIds);
   } else {
     await db.prepare("DELETE FROM task_worker_approvals WHERE task_id = ?").run(taskId);
+    await db.prepare("UPDATE tasks SET started_at = NULL, due_date = NULL, status = 'new', progress = 0 WHERE id = ? AND status != 'done'")
+      .run(taskId);
   }
   await ensureTaskChatGroup(taskId);
 }
@@ -365,6 +381,7 @@ async function parseTaskSheet(file) {
   const priorityColumn = findColumn("priority");
   const dueColumn = findColumn("due date", "due");
   const progressColumn = findColumn("progress", "progress percent");
+  const complexityColumn = findColumn("complexity", "complexity points", "points");
   const typeColumn = findColumn("task type", "type");
   const assigneesColumn = findColumn("assignees", "assigned to", "users");
   const tasks = [];
@@ -378,7 +395,7 @@ async function parseTaskSheet(file) {
       ? dueValue.toISOString().slice(0, 10)
       : typeof dueValue === "number"
         ? new Date((dueValue - 25569) * 86_400_000).toISOString().slice(0, 10)
-      : String(cellText(dueColumn) || new Date().toISOString().slice(0, 10)).slice(0, 10);
+      : String(cellText(dueColumn)).slice(0, 10);
     const priority = cellText(priorityColumn).toLowerCase();
     const rawProgress = progressColumn ? row.getCell(progressColumn).value : 0;
     const progress = typeof rawProgress === "number" && rawProgress > 0 && rawProgress <= 1
@@ -390,6 +407,7 @@ async function parseTaskSheet(file) {
         ? priority
         : "medium",
       dueDate,
+      complexity: normalizeComplexity(cellText(complexityColumn)),
       progress: Math.max(0, Math.min(100, progress)),
       taskType: normalizeTaskType(cellText(typeColumn)),
       assignees: cellText(assigneesColumn).split(/[,;]/).map((item) => item.trim()).filter(Boolean)
@@ -413,6 +431,14 @@ async function notifyTaskAudience(task, actorId, title, body) {
     WHERE id != ? AND (role = 'superadmin' OR department = ?)
   `).all(actorId, task.department);
   await Promise.all(audience.map((user) => notify(user.id, "message", title, body, task.id)));
+}
+
+async function notifyTaskManagers(task, actorId, title, body) {
+  const managers = await db.prepare(`
+    SELECT id FROM users
+    WHERE id != ? AND (role = 'superadmin' OR (role = 'admin' AND lower(trim(department)) = lower(trim(?))))
+  `).all(actorId, task.department);
+  await Promise.all(managers.map((user) => notify(user.id, "claim", title, body, task.id)));
 }
 
 async function chatDataFor(actor) {
@@ -473,14 +499,16 @@ async function chatDataFor(actor) {
 }
 
 function canManage(user, task) {
-  return user.role === "superadmin" || (user.role === "admin" && user.department === task.department);
+  return user.role === "superadmin" || (user.role === "admin" && sameDepartment(user.department, task.department));
 }
 
 async function canView(user, task) {
   if (user.role === "superadmin") return true;
-  if (user.department !== task.department) return false;
-  if (user.role === "admin" || !task.project_id) return true;
-  return Boolean(await db.prepare("SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ?").get(task.project_id, user.id));
+  if (!sameDepartment(user.department, task.department)) return false;
+  if (user.role === "admin") return true;
+  const assignedUserIds = await taskAssigneeIds(task.task_id ?? task.id);
+  if (assignedUserIds.length) return assignedUserIds.includes(user.id);
+  return !task.claim_requested_by_id || task.claim_requested_by_id === user.id;
 }
 
 function send(response, status, data) {
@@ -596,7 +624,7 @@ async function buildProductivityReport(user, month = "") {
   const monthFilter = /^\d{4}-\d{2}$/.test(month) ? month : "";
   const rows = await db.prepare(`
     SELECT DISTINCT tasks.id, tasks.task_code, tasks.title, tasks.department, tasks.priority, tasks.status,
-      tasks.due_date, tasks.progress, tasks.created_at, tasks.updated_at, tasks.completed_at,
+      tasks.due_date, tasks.complexity, tasks.started_at, tasks.progress, tasks.created_at, tasks.updated_at, tasks.completed_at,
       tasks.task_type, projects.name AS project_name
     FROM tasks
     JOIN task_assignees ON task_assignees.task_id = tasks.id
@@ -607,10 +635,10 @@ async function buildProductivityReport(user, month = "") {
   `).all(user.id, monthFilter, monthFilter, monthFilter);
   const today = new Date().toISOString().slice(0, 10);
   const completed = rows.filter((task) => task.status === "done");
-  const overdue = rows.filter((task) => task.status !== "done" && task.due_date < today);
-  const onTime = completed.filter((task) => task.completed_at?.slice(0, 10) <= task.due_date);
+  const overdue = rows.filter((task) => task.status !== "done" && task.due_date && task.due_date < today);
+  const onTime = completed.filter((task) => task.due_date && task.completed_at?.slice(0, 10) <= task.due_date);
   const completionDurations = completed
-    .map((task) => (new Date(`${task.completed_at.replace(" ", "T")}Z`).getTime() - new Date(`${task.created_at.replace(" ", "T")}Z`).getTime()) / 86_400_000)
+    .map((task) => (new Date(`${task.completed_at.replace(" ", "T")}Z`).getTime() - new Date(`${(task.started_at ?? task.created_at).replace(" ", "T")}Z`).getTime()) / 86_400_000)
     .filter((duration) => Number.isFinite(duration) && duration >= 0)
     .sort((a, b) => a - b);
   const averageCompletionDays = completionDurations.length
@@ -621,8 +649,11 @@ async function buildProductivityReport(user, month = "") {
       ? completionDurations[Math.floor(completionDurations.length / 2)]
       : (completionDurations[completionDurations.length / 2 - 1] + completionDurations[completionDurations.length / 2]) / 2
     : 0;
-  const averageProgress = rows.length
-    ? Math.round(rows.reduce((sum, task) => sum + task.progress, 0) / rows.length)
+  const totalComplexity = rows.reduce((sum, task) => sum + normalizeComplexity(task.complexity), 0);
+  const activeComplexity = rows.filter((task) => task.status !== "done").reduce((sum, task) => sum + normalizeComplexity(task.complexity), 0);
+  const completedComplexity = completed.reduce((sum, task) => sum + normalizeComplexity(task.complexity), 0);
+  const averageProgress = totalComplexity
+    ? Math.round(rows.reduce((sum, task) => sum + task.progress * normalizeComplexity(task.complexity), 0) / totalComplexity)
     : 0;
 
   const workbook = new ExcelJS.Workbook();
@@ -654,12 +685,15 @@ async function buildProductivityReport(user, month = "") {
     ["Open Tasks", rows.length - completed.length],
     ["Overdue Tasks", overdue.length],
     ["Completed On Time", onTime.length],
-    ["Completion Rate", rows.length ? completed.length / rows.length : 0],
-    ["Average Progress", averageProgress / 100],
+    ["Weighted Completion Rate", totalComplexity ? completedComplexity / totalComplexity : 0],
+    ["Complexity-Weighted Progress", averageProgress / 100],
     ["Average Completion Time (days)", averageCompletionDays],
     ["Median Completion Time (days)", medianCompletionDays],
     ["Fastest Completion (days)", completionDurations[0] ?? 0],
-    ["On-Time Completion Rate", completed.length ? onTime.length / completed.length : 0]
+    ["On-Time Completion Rate", completed.length ? onTime.length / completed.length : 0],
+    ["Total Complexity Points", totalComplexity],
+    ["Active Complexity Load", activeComplexity],
+    ["Completed Complexity Points", completedComplexity]
   ];
   summary.getCell("A7").value = "Productivity Summary";
   summary.getCell("A7").font = { bold: true, color: { argb: "FF0B456B" }, size: 13 };
@@ -686,8 +720,10 @@ async function buildProductivityReport(user, month = "") {
     { header: "Department", key: "department", width: 38 },
     { header: "Priority", key: "priority", width: 12 },
     { header: "Status", key: "status", width: 18 },
+    { header: "Complexity", key: "complexity", width: 12 },
     { header: "Progress", key: "progress", width: 12 },
     { header: "Created", key: "created", width: 14 },
+    { header: "Started", key: "started", width: 18 },
     { header: "Due", key: "due", width: 14 },
     { header: "Completed", key: "completed", width: 18 },
     { header: "On Time", key: "onTime", width: 12 },
@@ -708,22 +744,25 @@ async function buildProductivityReport(user, month = "") {
       department: task.department,
       priority: task.priority,
       status: task.status.replaceAll("_", " "),
+      complexity: normalizeComplexity(task.complexity),
       progress: task.progress / 100,
       created: new Date(`${task.created_at.replace(" ", "T")}Z`),
-      due: new Date(`${task.due_date}T00:00:00`),
+      started: task.started_at ? new Date(`${task.started_at.replace(" ", "T")}Z`) : null,
+      due: task.due_date ? new Date(`${task.due_date}T00:00:00`) : null,
       completed: completedDate,
-      onTime: completedDate ? (task.completed_at.slice(0, 10) <= task.due_date ? "Yes" : "No") : "",
+      onTime: completedDate && task.due_date ? (task.completed_at.slice(0, 10) <= task.due_date ? "Yes" : "No") : "",
       cycleTime: completedDate
-        ? (completedDate.getTime() - new Date(`${task.created_at.replace(" ", "T")}Z`).getTime()) / 86_400_000
+        ? (completedDate.getTime() - new Date(`${(task.started_at ?? task.created_at).replace(" ", "T")}Z`).getTime()) / 86_400_000
         : null
     });
   }
   tasks.getColumn("progress").numFmt = "0%";
   tasks.getColumn("created").numFmt = "yyyy-mm-dd";
+  tasks.getColumn("started").numFmt = "yyyy-mm-dd hh:mm";
   tasks.getColumn("due").numFmt = "yyyy-mm-dd";
   tasks.getColumn("completed").numFmt = "yyyy-mm-dd hh:mm";
   tasks.getColumn("cycleTime").numFmt = "0.0";
-  tasks.autoFilter = { from: "A1", to: "M1" };
+  tasks.autoFilter = { from: "A1", to: "O1" };
   tasks.eachRow((row, rowNumber) => {
     if (rowNumber > 1 && rowNumber % 2 === 0) row.eachCell((cell) => { cell.fill = paleFill; });
   });
@@ -754,15 +793,16 @@ async function buildProjectTaskTemplate(project) {
   tasks.columns = [
     { header: "Task", key: "task", width: 42 },
     { header: "Priority", key: "priority", width: 14 },
+    { header: "Complexity", key: "complexity", width: 14 },
     { header: "Due Date", key: "dueDate", width: 16 },
     { header: "Progress", key: "progress", width: 14 },
     { header: "Task Type", key: "taskType", width: 20 },
     { header: "Assignees", key: "assignees", width: 48 }
   ];
   tasks.addRows([
-    { task: "Prepare technical submittal package", priority: "high", dueDate: due(7), progress: 0, taskType: "Technical", assignees: firstUser },
-    { task: "Review quantity takeoff and measurements", priority: "medium", dueDate: due(12), progress: 25, taskType: "QS", assignees: secondUser },
-    { task: "Coordinate BIM model and shop drawings", priority: "urgent", dueDate: due(18), progress: 0, taskType: "BIM", assignees: `${firstUser};${secondUser}` }
+    { task: "Prepare technical submittal package", priority: "high", complexity: 3, dueDate: due(7), progress: 0, taskType: "Technical", assignees: firstUser },
+    { task: "Review quantity takeoff and measurements", priority: "medium", complexity: 2, dueDate: due(12), progress: 25, taskType: "QS", assignees: secondUser },
+    { task: "Coordinate BIM model and shop drawings", priority: "urgent", complexity: 5, dueDate: due(18), progress: 0, taskType: "BIM", assignees: `${firstUser};${secondUser}` }
   ]);
   tasks.getRow(1).height = 28;
   tasks.getRow(1).eachCell((cell) => {
@@ -772,11 +812,12 @@ async function buildProjectTaskTemplate(project) {
   });
   tasks.getColumn("dueDate").numFmt = "yyyy-mm-dd";
   tasks.getColumn("progress").numFmt = "0";
-  tasks.autoFilter = { from: "A1", to: "F1" };
+  tasks.autoFilter = { from: "A1", to: "G1" };
   for (let row = 2; row <= 250; row += 1) {
     tasks.getCell(`B${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"low,medium,high,urgent"'] };
-    tasks.getCell(`D${row}`).dataValidation = { type: "whole", operator: "between", allowBlank: true, formulae: [0, 100] };
-    tasks.getCell(`E${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"Technical,QS,Shop Drawings,BIM,Variation"'] };
+    tasks.getCell(`C${row}`).dataValidation = { type: "whole", operator: "between", allowBlank: false, formulae: [1, 5] };
+    tasks.getCell(`E${row}`).dataValidation = { type: "whole", operator: "between", allowBlank: true, formulae: [0, 100] };
+    tasks.getCell(`F${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"Technical,QS,Shop Drawings,BIM,Variation"'] };
   }
   tasks.eachRow((row, rowNumber) => {
     if (rowNumber > 1 && rowNumber % 2 === 0) row.eachCell((cell) => { cell.fill = paleFill; });
@@ -881,7 +922,7 @@ const server = createServer(async (request, response) => {
     const fileDownloadMatch = path.match(/^\/api\/files\/([^/]+)\/download$/);
     if (request.method === "GET" && fileDownloadMatch) {
       const file = await db.prepare(`
-        SELECT task_files.*, tasks.department, tasks.assignee_id, tasks.project_id
+        SELECT task_files.*, tasks.id AS task_id, tasks.department, tasks.assignee_id, tasks.project_id
         FROM task_files JOIN tasks ON tasks.id = task_files.task_id
         WHERE task_files.id = ?
       `).get(fileDownloadMatch[1]);
@@ -1021,7 +1062,7 @@ const server = createServer(async (request, response) => {
         department: actor.role === "admin" ? actor.department : body.department
       };
       validateUserScope(actor, target);
-      target.department = await requireDepartment(target.department);
+      target.department = target.role === "superadmin" ? "Executive" : await requireDepartment(target.department);
       if (!target.name || !target.username || !target.password) throw new Error("Name, username, and password are required.");
       await db.prepare(`
         INSERT INTO users (id, name, username, password_hash, role, department)
@@ -1042,7 +1083,8 @@ const server = createServer(async (request, response) => {
         department: actor.role === "admin" ? actor.department : body.department
       };
       validateUserScope(actor, target);
-      target.department = await requireDepartment(target.department);
+      target.department = target.role === "superadmin" ? "Executive" : await requireDepartment(target.department);
+      if (!target.name || !target.username) throw new Error("Name and username are required.");
       await db.prepare("UPDATE users SET name = ?, username = ?, role = ?, department = ? WHERE id = ?")
         .run(target.name, target.username, target.role, target.department, target.id);
       if (body.password) await db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(body.password), target.id);
@@ -1058,7 +1100,7 @@ const server = createServer(async (request, response) => {
       await db.exec(`
         UPDATE tasks SET assignee_id = (SELECT user_id FROM task_assignees WHERE task_id = tasks.id LIMIT 1)
         WHERE assignee_id IS NULL;
-        UPDATE tasks SET status = 'new', progress = 0
+        UPDATE tasks SET status = 'new', progress = 0, started_at = NULL, due_date = NULL
         WHERE status != 'done' AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_id = tasks.id);
       `);
       return send(response, 200, { ok: true });
@@ -1120,10 +1162,11 @@ const server = createServer(async (request, response) => {
           const taskCode = await generateTaskCode(project.name, project.department);
           const status = assigneeIds.length ? (imported.progress > 0 ? "in_progress" : "assigned") : "new";
           await db.prepare(`
-            INSERT INTO tasks (id, task_code, title, department, priority, status, assignee_id, project_id, task_type, due_date, progress, created_by_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (id, task_code, title, department, priority, status, assignee_id, project_id, task_type, due_date, complexity, started_at, progress, created_by_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, ?, ?)
           `).run(id, taskCode, imported.title, project.department, imported.priority, status, assigneeIds[0] ?? null,
-            project.id, imported.taskType, imported.dueDate, assigneeIds.length ? imported.progress : 0, actor.id);
+            project.id, imported.taskType, assigneeIds.length ? (imported.dueDate || null) : null,
+            imported.complexity, assigneeIds.length ? 1 : 0, assigneeIds.length ? imported.progress : 0, actor.id);
           for (const userId of assigneeIds) {
             await db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(id, userId);
           }
@@ -1160,7 +1203,7 @@ const server = createServer(async (request, response) => {
           WHERE project_id = ?
         `).run(project.id);
         await db.prepare(`
-          UPDATE tasks SET status = 'new', progress = 0
+          UPDATE tasks SET status = 'new', progress = 0, started_at = NULL, due_date = NULL
           WHERE project_id = ? AND status != 'done'
             AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_id = tasks.id)
         `).run(project.id);
@@ -1188,6 +1231,8 @@ const server = createServer(async (request, response) => {
       await requireDepartment(department);
       if (actor.role === "admin" && !sameDepartment(department, actor.department)) return send(response, 403, { message: "Admins can create tasks in their department only." });
       const assignees = await validTaskAssignees(requestedIds, department, project?.id ?? null);
+      const complexity = normalizeComplexity(body.complexity);
+      const dueDate = assignees.length ? (String(body.dueDate ?? "").slice(0, 10) || null) : null;
       const task = {
         id: randomUUID(),
         title: String(body.title ?? "").trim(),
@@ -1195,7 +1240,8 @@ const server = createServer(async (request, response) => {
         priority: body.priority,
         status: assignees.length ? (Number(body.progress) > 0 ? "in_progress" : "assigned") : "new",
         assigneeIds: assignees.map((assignee) => assignee.id),
-        dueDate: body.dueDate,
+        dueDate,
+        complexity,
         progress: assignees.length ? Math.max(0, Math.min(100, Number(body.progress) || 0)) : 0,
         projectId: project?.id ?? null,
         taskType: normalizeTaskType(body.taskType)
@@ -1203,10 +1249,10 @@ const server = createServer(async (request, response) => {
       task.taskCode = await generateTaskCode(project?.name, department);
       if (!task.title) throw new Error("Task title is required.");
       await db.prepare(`
-        INSERT INTO tasks (id, task_code, title, department, priority, status, assignee_id, project_id, task_type, due_date, progress, created_by_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO tasks (id, task_code, title, department, priority, status, assignee_id, project_id, task_type, due_date, complexity, started_at, progress, created_by_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, ?, ?)
       `).run(task.id, task.taskCode, task.title, task.department, task.priority, task.status, task.assigneeIds[0] ?? null,
-        task.projectId, task.taskType, task.dueDate, task.progress, actor.id);
+        task.projectId, task.taskType, task.dueDate, task.complexity, task.assigneeIds.length ? 1 : 0, task.progress, actor.id);
       await setTaskAssignees(task.id, task.assigneeIds);
       try {
         await saveTaskFiles(task.id, actor, body.files);
@@ -1232,12 +1278,20 @@ const server = createServer(async (request, response) => {
       if (actor.role === "admin" && !sameDepartment(department, actor.department)) return send(response, 403, { message: "Admins can edit tasks in their department only." });
       const assignees = await validTaskAssignees(requestedIds, department, project?.id ?? null);
       const previousIds = await taskAssigneeIds(existing.id);
+      const complexity = normalizeComplexity(body.complexity ?? existing.complexity);
+      const dueDate = assignees.length
+        ? (String(body.dueDate ?? existing.due_date ?? "").slice(0, 10) || null)
+        : null;
+      const status = assignees.length ? body.status : "new";
+      const progress = assignees.length ? Math.max(0, Math.min(100, Number(body.progress) || 0)) : 0;
       await db.prepare(`
-        UPDATE tasks SET title = ?, department = ?, priority = ?, status = ?, assignee_id = ?, project_id = ?, task_type = ?, due_date = ?, progress = ?, updated_at = CURRENT_TIMESTAMP
+        UPDATE tasks SET title = ?, department = ?, priority = ?, status = ?, assignee_id = ?, project_id = ?, task_type = ?, due_date = ?, complexity = ?,
+          started_at = CASE WHEN ? = 1 THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE NULL END,
+          claim_requested_by_id = NULL, claim_requested_at = NULL, progress = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(String(body.title).trim(), department, body.priority, body.status, assignees[0]?.id ?? null,
-        project?.id ?? null, normalizeTaskType(body.taskType), body.dueDate,
-        Math.max(0, Math.min(100, Number(body.progress) || 0)), existing.id);
+      `).run(String(body.title).trim(), department, body.priority, status, assignees[0]?.id ?? null,
+        project?.id ?? null, normalizeTaskType(body.taskType), dueDate, complexity,
+        assignees.length ? 1 : 0, progress, existing.id);
       await setTaskAssignees(existing.id, assignees.map((assignee) => assignee.id));
       if (body.status === "done") await deleteTaskChatGroup(existing.id);
       for (const assignee of assignees.filter((item) => !previousIds.includes(item.id))) {
@@ -1279,7 +1333,7 @@ const server = createServer(async (request, response) => {
       return send(response, 200, { task: await serializeTask(task) });
     }
 
-    const actionMatch = path.match(/^\/api\/tasks\/([^/]+)\/(claim|submit|approve|reopen|messages|files)$/);
+    const actionMatch = path.match(/^\/api\/tasks\/([^/]+)\/(claim|claim-approve|claim-reject|submit|approve|reopen|messages|files)$/);
     if (actionMatch && request.method === "POST") {
       const task = await getTask(actionMatch[1]);
       if (!task) return send(response, 404, { message: "Task not found." });
@@ -1287,10 +1341,36 @@ const server = createServer(async (request, response) => {
       const assignedUserIds = await taskAssigneeIds(task.id);
 
       if (action === "claim") {
-        if (actor.role !== "user" || actor.department !== task.department || assignedUserIds.length || !await canView(actor, task)) return send(response, 403, { message: "This task cannot be claimed." });
-        await db.prepare("UPDATE tasks SET assignee_id = ?, status = 'assigned', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(actor.id, task.id);
-        await db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(task.id, actor.id);
-        await notifyTaskAudience(task, actor.id, "Free task claimed", `${actor.name} took: ${task.title}`);
+        if (actor.role !== "user" || !sameDepartment(actor.department, task.department) || assignedUserIds.length || !await canView(actor, task)) return send(response, 403, { message: "This task cannot be claimed." });
+        const result = await db.prepare(`
+          UPDATE tasks SET claim_requested_by_id = ?, claim_requested_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND claim_requested_by_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_id = ?)
+        `).run(actor.id, task.id, task.id);
+        if (!result.changes) return send(response, 409, { message: "Another claim request is already waiting for approval." });
+        await notifyTaskManagers(task, actor.id, "Task claim needs approval", `${actor.name} requested to take ${task.task_code}: ${task.title}`, task.id);
+      }
+      if (action === "claim-approve") {
+        if (!canManage(actor, task)) return send(response, 403, { message: "Manager approval is required." });
+        if (assignedUserIds.length || !task.claim_requested_by_id) return send(response, 409, { message: "This task has no pending claim request." });
+        const requester = await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(task.claim_requested_by_id);
+        if (!requester || !sameDepartment(requester.department, task.department)) return send(response, 409, { message: "The requesting user is no longer eligible." });
+        await db.transaction(async () => {
+          await db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(task.id, requester.id);
+          await db.prepare(`
+            UPDATE tasks SET assignee_id = ?, status = 'assigned', started_at = CURRENT_TIMESTAMP, due_date = ?,
+              claim_requested_by_id = NULL, claim_requested_at = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).run(requester.id, null, task.id);
+        });
+        await notify(requester.id, "claim", "Task claim approved", `${actor.name} approved your request for ${task.task_code}: ${task.title}`, task.id);
+      }
+      if (action === "claim-reject") {
+        if (!canManage(actor, task)) return send(response, 403, { message: "Manager approval is required." });
+        if (!task.claim_requested_by_id) return send(response, 409, { message: "This task has no pending claim request." });
+        const requesterId = task.claim_requested_by_id;
+        await db.prepare("UPDATE tasks SET claim_requested_by_id = NULL, claim_requested_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
+        await notify(requesterId, "claim", "Task claim declined", `${actor.name} declined your request for ${task.task_code}: ${task.title}`, task.id);
       }
       if (action === "submit") {
         if (actor.role !== "user" || !assignedUserIds.includes(actor.id) || ["done", "under_review"].includes(task.status)) return send(response, 403, { message: "This task cannot be submitted." });

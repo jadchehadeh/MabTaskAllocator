@@ -36,9 +36,16 @@ export type ManagedTask = {
   candidateNames: string[];
   workerApprovals: WorkerApproval[];
   pendingApprovalNames: string[];
+  claimRequest?: {
+    userId: string;
+    userName: string;
+    requestedAt?: string;
+  };
   projectId?: string;
   projectName?: string;
   taskType: TaskType;
+  complexity: number;
+  startedAt?: string;
   dueDate: string;
   progress: number;
   reviewComment?: string;
@@ -249,7 +256,7 @@ export const api = {
     request(`/api/users/${user.id}`, { method: "PUT", body: JSON.stringify(user) }),
   deleteUser: (userId: string) => request(`/api/users/${userId}`, { method: "DELETE" }),
   async createTask(
-    task: Omit<ManagedTask, "id" | "taskCode" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso" | "workerApprovals" | "pendingApprovalNames">,
+    task: Omit<ManagedTask, "id" | "taskCode" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso" | "startedAt" | "workerApprovals" | "pendingApprovalNames">,
     files: File[] = []
   ) {
     return request("/api/tasks", {
@@ -260,7 +267,7 @@ export const api = {
   updateTask: (task: ManagedTask) =>
     request(`/api/tasks/${task.id}`, { method: "PUT", body: JSON.stringify(task) }),
   deleteTask: (taskId: string) => request(`/api/tasks/${taskId}`, { method: "DELETE" }),
-  taskAction: (taskId: string, action: "claim" | "submit" | "approve", body = {}) =>
+  taskAction: (taskId: string, action: "claim" | "claim-approve" | "claim-reject" | "submit" | "approve", body = {}) =>
     request(`/api/tasks/${taskId}/${action}`, { method: "POST", body: JSON.stringify(body) }),
   reopenTask: (taskId: string, comment: string) =>
     request(`/api/tasks/${taskId}/reopen`, { method: "POST", body: JSON.stringify({ comment }) }),

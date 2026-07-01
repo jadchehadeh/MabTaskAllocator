@@ -46,6 +46,7 @@ const defaultDepartments: DepartmentName[] = [
 ];
 
 const taskTypes: TaskType[] = ["Technical", "QS", "Shop Drawings", "BIM", "Variation"];
+const complexityLabels = ["", "Very low", "Low", "Moderate", "High", "Very high"];
 const themeKeyPrefix = "mab-task-allocator.theme.";
 
 function storedDarkMode(ownerId: string) {
@@ -93,6 +94,10 @@ function clampProgress(progress: number) {
   return Math.min(100, Math.max(0, progress));
 }
 
+function complexityPoints(task: Pick<ManagedTask, "complexity">) {
+  return Math.min(5, Math.max(1, Math.round(Number(task.complexity) || 3)));
+}
+
 function getPriorityRank(priority: TaskPriority) {
   const ranks: Record<TaskPriority, number> = {
     urgent: 0,
@@ -110,7 +115,7 @@ function sortTasksByPriority(tasksToSort: ManagedTask[]) {
       getPriorityRank(firstTask.priority) - getPriorityRank(secondTask.priority);
 
     if (priorityDifference !== 0) return priorityDifference;
-    return firstTask.dueDate.localeCompare(secondTask.dueDate);
+    return (firstTask.dueDate || "9999-12-31").localeCompare(secondTask.dueDate || "9999-12-31");
   });
 }
 
@@ -122,7 +127,7 @@ function formatFileSize(size: number) {
 
 function completionDays(task: ManagedTask) {
   if (!task.completedAtIso) return null;
-  const duration = (new Date(task.completedAtIso).getTime() - new Date(task.createdAt).getTime()) / 86_400_000;
+  const duration = (new Date(task.completedAtIso).getTime() - new Date(task.startedAt ?? task.createdAt).getTime()) / 86_400_000;
   return Number.isFinite(duration) && duration >= 0 ? duration : null;
 }
 
@@ -322,6 +327,8 @@ export function App() {
   const [activeView, setActiveView] = useState<
     "dashboard" | "projects" | "tasks" | "todos" | "finished" | "people" | "team" | "productivity" | "chat"
   >("dashboard");
+  const [activeTaskSection, setActiveTaskSection] = useState<"assigned" | "free">("assigned");
+  const [managerTaskSection, setManagerTaskSection] = useState<"all" | "review" | "free">("all");
   const [showNotifications, setShowNotifications] = useState(false);
   const [appLoading, setAppLoading] = useState(hasSession());
   const [loginError, setLoginError] = useState("");
@@ -398,8 +405,9 @@ export function App() {
     department: "Mechanical Technical office engineer" as DepartmentName,
     priority: "high" as TaskPriority,
     taskType: "Technical" as TaskType,
+    complexity: 3,
     projectId: "",
-    dueDate: "2026-07-05",
+    dueDate: "",
     progress: 0
   });
   const [projectDraft, setProjectDraft] = useState({
@@ -412,15 +420,28 @@ export function App() {
   const [projectMemberDrafts, setProjectMemberDrafts] = useState<Record<string, string[]>>({});
   const [projectEditDrafts, setProjectEditDrafts] = useState<Record<string, { name: string; description: string }>>({});
   const [confirmation, setConfirmation] = useState<{
+    title: string;
     message: string;
+    confirmLabel: string;
+    danger: boolean;
     onConfirm: () => Promise<void> | void;
   } | null>(null);
 
   const canManagePeople = currentUser?.role === "superadmin" || currentUser?.role === "admin";
   const canAllocateTasks = currentUser?.role === "superadmin" || currentUser?.role === "admin";
 
-  function requestConfirmation(message: string, onConfirm: () => Promise<void> | void) {
-    setConfirmation({ message, onConfirm });
+  function requestConfirmation(
+    message: string,
+    onConfirm: () => Promise<void> | void,
+    options: { title?: string; confirmLabel?: string; danger?: boolean } = {}
+  ) {
+    setConfirmation({
+      title: options.title ?? "Confirm deletion",
+      message,
+      confirmLabel: options.confirmLabel ?? "Yes, delete",
+      danger: options.danger ?? true,
+      onConfirm
+    });
   }
 
   async function refreshData(silent = false) {
@@ -541,18 +562,34 @@ export function App() {
     const matchingTasks =
       currentUser.role === "superadmin"
         ? tasks
-        : tasks.filter((task) =>
-            task.department === currentUser.department &&
-            (currentUser.role === "admin" || !task.projectId || projects.some((project) => project.id === task.projectId))
-          );
+        : tasks.filter((task) => sameDepartment(task.department, currentUser.department));
 
     return sortTasksByPriority(matchingTasks);
-  }, [currentUser, projects, tasks]);
+  }, [currentUser, tasks]);
 
   const activeTasks = useMemo(
     () => visibleTasks.filter((task) => task.status !== "done"),
     [visibleTasks]
   );
+
+  const assignedActiveTasks = useMemo(
+    () => currentUser?.role === "user"
+      ? activeTasks.filter((task) => task.assigneeIds.includes(currentUser.id))
+      : activeTasks,
+    [activeTasks, currentUser]
+  );
+
+  const freeActiveTasks = useMemo(
+    () => activeTasks.filter((task) => task.assigneeIds.length === 0),
+    [activeTasks]
+  );
+
+  const activeTaskSectionTasks = currentUser?.role === "user"
+    ? activeTaskSection === "assigned" ? assignedActiveTasks : freeActiveTasks
+    : managerTaskSection === "review"
+      ? activeTasks.filter((task) => task.status === "under_review")
+      : managerTaskSection === "free" ? freeActiveTasks : activeTasks;
+  const dashboardTasks = currentUser?.role === "user" ? assignedActiveTasks : activeTasks;
 
   const todoLinkableTasks = useMemo(() => activeTasks.filter((task) =>
     currentUser?.role !== "user" || task.assigneeIds.includes(currentUser.id)
@@ -632,12 +669,13 @@ export function App() {
     }));
   }, [canAllocateTasks, currentUser?.id, selectedDraftProject?.id, taskDraftAssignableUsers.map((user) => user.id).join(",")]);
 
-  const openTasks = activeTasks.length;
-  const urgentTasks = activeTasks.filter((task) => task.priority === "urgent").length;
-  const reviewTasks = activeTasks.filter((task) => task.status === "under_review").length;
-  const overdueTasks = activeTasks.filter((task) => task.dueDate < new Date().toISOString().slice(0, 10)).length;
-  const averageProgress = visibleTasks.length
-    ? Math.round(visibleTasks.reduce((sum, task) => sum + task.progress, 0) / visibleTasks.length)
+  const openTasks = dashboardTasks.length;
+  const urgentTasks = dashboardTasks.filter((task) => task.priority === "urgent").length;
+  const reviewTasks = dashboardTasks.filter((task) => task.status === "under_review").length;
+  const overdueTasks = dashboardTasks.filter((task) => task.dueDate && task.dueDate < new Date().toISOString().slice(0, 10)).length;
+  const dashboardComplexity = dashboardTasks.reduce((sum, task) => sum + complexityPoints(task), 0);
+  const averageProgress = dashboardComplexity
+    ? Math.round(dashboardTasks.reduce((sum, task) => sum + task.progress * complexityPoints(task), 0) / dashboardComplexity)
     : 0;
   const unreadNotifications = notifications.filter((notification) => !notification.isRead).length;
   const selectedChatChannel = chatChannels.find((channel) => channel.id === selectedChannelId);
@@ -647,6 +685,12 @@ export function App() {
     (currentUser?.role === "admin" && selectedChatChannel.department === currentUser.department)
   ));
 
+  function openTaskQueue(section: "assigned" | "free" | "all" | "review") {
+    if (currentUser?.role === "user") setActiveTaskSection(section === "free" ? "free" : "assigned");
+    else setManagerTaskSection(section === "review" ? "review" : section === "free" ? "free" : "all");
+    setActiveView("tasks");
+  }
+
   function userMetrics(userId: string, month = "") {
     const assigned = tasks.filter((task) => task.assigneeIds.includes(userId));
     const inPeriod = month
@@ -654,17 +698,25 @@ export function App() {
       : assigned;
     const completed = inPeriod.filter((task) => task.status === "done");
     const durations = completed.map(completionDays).filter((value): value is number => value !== null);
-    const onTime = completed.filter((task) => task.completedAtIso && task.completedAtIso.slice(0, 10) <= task.dueDate);
-    const overdue = inPeriod.filter((task) => task.status !== "done" && task.dueDate < new Date().toISOString().slice(0, 10));
+    const onTime = completed.filter((task) => task.completedAtIso && task.dueDate && task.completedAtIso.slice(0, 10) <= task.dueDate);
+    const overdue = inPeriod.filter((task) => task.status !== "done" && task.dueDate && task.dueDate < new Date().toISOString().slice(0, 10));
+    const assignedComplexity = inPeriod.reduce((sum, task) => sum + complexityPoints(task), 0);
+    const activeComplexity = assigned.filter((task) => task.status !== "done").reduce((sum, task) => sum + complexityPoints(task), 0);
+    const completedComplexity = completed.reduce((sum, task) => sum + complexityPoints(task), 0);
     return {
       assigned: inPeriod.length,
       active: assigned.filter((task) => task.status !== "done").length,
       completed: completed.length,
       completedInMonth: assigned.filter((task) => task.completedAtIso?.startsWith(teamMonth)).length,
       overdue: overdue.length,
-      averageProgress: Math.round(average(inPeriod.map((task) => task.progress))),
+      averageProgress: assignedComplexity
+        ? Math.round(inPeriod.reduce((sum, task) => sum + task.progress * complexityPoints(task), 0) / assignedComplexity)
+        : 0,
+      assignedComplexity,
+      activeComplexity,
+      completedComplexity,
       averageCompletionDays: average(durations),
-      completionRate: inPeriod.length ? completed.length / inPeriod.length : 0,
+      completionRate: assignedComplexity ? completedComplexity / assignedComplexity : 0,
       onTimeRate: completed.length ? onTime.length / completed.length : 0
     };
   }
@@ -907,6 +959,7 @@ export function App() {
         projectId: selectedDraftProject?.id,
         projectName: selectedDraftProject?.name,
         taskType: taskDraft.taskType,
+        complexity: taskDraft.complexity,
         dueDate: taskDraft.dueDate,
         progress: assignees.length ? clampProgress(taskDraft.progress) : 0,
         reviewComment: undefined,
@@ -928,7 +981,7 @@ export function App() {
   function startEditTask(task: ManagedTask) {
     if (!canManageTask(task)) return;
     setEditingTaskId(task.id);
-    setTaskEditDraft({ ...task });
+    setTaskEditDraft({ ...task, complexity: complexityPoints(task) });
   }
 
   async function saveEditTask() {
@@ -1009,9 +1062,27 @@ export function App() {
     try {
       await api.taskAction(task.id, "claim");
       await refreshData(true);
-      setAllocationMessage(`${currentUser.name} took "${task.title}".`);
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: "Claim request sent. Waiting for manager approval." }));
     } catch (error) {
-      setAllocationMessage(error instanceof Error ? error.message : "Could not claim this task.");
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: error instanceof Error ? error.message : "Could not request this task." }));
+    }
+  }
+
+  function confirmTaskClaim(task: ManagedTask) {
+    requestConfirmation(
+      `Are you sure you want to request Task #${task.taskCode}: “${task.title}”? An admin must approve before the task starts.`,
+      () => claimTask(task),
+      { title: "Request this task?", confirmLabel: "Yes, request task", danger: false }
+    );
+  }
+
+  async function reviewTaskClaim(task: ManagedTask, approve: boolean) {
+    try {
+      await api.taskAction(task.id, approve ? "claim-approve" : "claim-reject");
+      await refreshData(true);
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: approve ? "Claim approved. The task start was recorded." : "Claim request declined." }));
+    } catch (error) {
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: error instanceof Error ? error.message : "Could not review this request." }));
     }
   }
 
@@ -1022,10 +1093,18 @@ export function App() {
     try {
       await api.taskAction(task.id, "submit");
       await refreshData(true);
-      setAllocationMessage(`Your approval for Task #${task.taskCode} was recorded.`);
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: `Task #${task.taskCode} was submitted as finished.` }));
     } catch (error) {
       setAllocationMessage(error instanceof Error ? error.message : "Could not submit this task.");
     }
+  }
+
+  function confirmFinishTask(task: ManagedTask) {
+    requestConfirmation(
+      `Are you sure you finished Task #${task.taskCode}: “${task.title}”? It will be sent for manager review.`,
+      () => submitTaskForReview(task),
+      { title: "Finish this task?", confirmLabel: "Yes, finish task", danger: false }
+    );
   }
 
   async function approveTask(task: ManagedTask) {
@@ -1320,7 +1399,11 @@ export function App() {
       currentUser?.role === "user" &&
       task.department === currentUser.department &&
       !task.assigneeIds.length &&
+      !task.claimRequest &&
       task.status === "new";
+    const hasPendingClaim = Boolean(task.claimRequest && !task.assigneeIds.length);
+    const canReviewClaim = Boolean(hasPendingClaim && currentUser && ["admin", "superadmin"].includes(currentUser.role));
+    const canDirectAssign = Boolean(canEditTask && !task.assigneeIds.length && !task.claimRequest);
     const canSubmitForReview =
       currentUser?.role === "user" &&
       task.assigneeIds.includes(currentUser.id) &&
@@ -1439,7 +1522,13 @@ export function App() {
                 <option value="under_review">Under Review</option>
                 <option value="done">Done</option>
               </select>
+              <label className="task-field-label">Complexity
+                <select onChange={(event) => setTaskEditDraft({ ...taskEditDraft, complexity: Number(event.target.value) })} value={taskEditDraft.complexity}>
+                  {[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value} / 5 · {complexityLabels[value]}</option>)}
+                </select>
+              </label>
               <input
+                disabled={!taskEditDraft.assigneeIds.length}
                 onChange={(event) =>
                   setTaskEditDraft({ ...taskEditDraft, dueDate: event.target.value })
                 }
@@ -1447,6 +1536,7 @@ export function App() {
                 value={taskEditDraft.dueDate}
               />
               <input
+                disabled={!taskEditDraft.assigneeIds.length}
                 max="100"
                 min="0"
                 onChange={(event) =>
@@ -1463,7 +1553,7 @@ export function App() {
             <>
               <div>
                 <div className="task-title-line"><span className="task-code">Task #{task.taskCode}</span><strong>{task.title}</strong></div>
-                <p>{task.department} - Due {task.dueDate}</p>
+                <p>{task.department} · {task.startedAt ? `Started ${new Date(task.startedAt).toLocaleDateString("en-GB")}` : "Not started"} · {task.dueDate ? `Due ${task.dueDate}` : "No planned due date"}</p>
                 {task.reviewComment ? <p className="review-note">Review: {task.reviewComment}</p> : null}
                 <div className="task-progress">
                   <span style={{ width: `${task.progress}%` }} />
@@ -1475,6 +1565,7 @@ export function App() {
                 </span>
                 <span>{statusLabels[task.status]}</span>
                 <span>{task.taskType}</span>
+                <span>Complexity: {complexityPoints(task)}/5</span>
                 {task.projectName ? <span>Project: {task.projectName}</span> : null}
                 <span>Assigned: {task.candidateName ?? "Unassigned"}</span>
                 <span>{task.progress}%</span>
@@ -1482,7 +1573,7 @@ export function App() {
             </>
           )}
 
-          {canEditTask || canDeleteTask || canClaimTask || canSubmitForReview ? (
+          {canEditTask || canDeleteTask || canClaimTask || canSubmitForReview || canReviewClaim ? (
             <div className="row-actions task-actions">
               {isEditingTask ? (
                 <>
@@ -1504,21 +1595,26 @@ export function App() {
               ) : (
                 <>
                   {canClaimTask ? (
-                    <button type="button" className="task-action-button" onClick={() => claimTask(task)}>
+                    <button type="button" className="task-action-button" onClick={() => confirmTaskClaim(task)}>
                       <Hand aria-hidden="true" size={16} />
-                      Take
+                      Request to Take
                     </button>
                   ) : null}
+                  {canReviewClaim ? <>
+                    <button type="button" className="task-action-button" onClick={() => reviewTaskClaim(task, true)}><CheckCircle2 aria-hidden="true" size={16} />Approve Claim</button>
+                    <button type="button" className="task-action-button secondary" onClick={() => reviewTaskClaim(task, false)}><X aria-hidden="true" size={16} />Reject</button>
+                  </> : null}
                   {canSubmitForReview ? (
-                    <button type="button" className="task-action-button" onClick={() => submitTaskForReview(task)}>
+                    <button type="button" className="task-action-button" onClick={() => confirmFinishTask(task)}>
                       <CheckCircle2 aria-hidden="true" size={16} />
-                      Approve Work
+                      Finish Task
                     </button>
                   ) : null}
                   {canEditTask ? (
-                    <button type="button" className="icon-button" onClick={() => startEditTask(task)} aria-label="Edit task">
-                      <Edit3 aria-hidden="true" size={16} />
-                    </button>
+                    <>
+                      {canDirectAssign ? <button type="button" className="task-action-button secondary" onClick={() => startEditTask(task)}><UserPlus aria-hidden="true" size={16} />Assign User</button> : null}
+                      <button type="button" className="icon-button" onClick={() => startEditTask(task)} aria-label="Edit task"><Edit3 aria-hidden="true" size={16} /></button>
+                    </>
                   ) : null}
                   {canDeleteTask ? (
                     <button type="button" className="icon-button danger" onClick={() => deleteTask(task)} aria-label="Delete task">
@@ -1530,6 +1626,13 @@ export function App() {
             </div>
           ) : null}
         </div>
+
+        {task.claimRequest ? (
+          <div className={`claim-request-note ${canReviewClaim ? "manager" : ""}`}>
+            <Hand aria-hidden="true" size={17} />
+            <div><strong>{task.claimRequest.userId === currentUser?.id ? "Your request is waiting for approval" : `${task.claimRequest.userName} requested this task`}</strong><span>The task has not started. Complexity and scheduling remain separate manager decisions.</span></div>
+          </div>
+        ) : null}
 
         {task.status === "under_review" && currentUser && task.assigneeIds.includes(currentUser.id) ? (
           <p className="review-note">All assigned workers approved. Waiting for admin approval.</p>
@@ -1573,6 +1676,8 @@ export function App() {
           </div>
         ) : null}
 
+        <details className="task-collaboration-details">
+          <summary><span><MessageSquare aria-hidden="true" size={15} />Discussion <b>{task.messages.length}</b></span><span><Paperclip aria-hidden="true" size={15} />Documents <b>{task.files.length}</b></span><small>Open workspace</small></summary>
         <div className="task-collab">
           <div className="task-thread">
             <div className="collab-heading">
@@ -1672,6 +1777,7 @@ export function App() {
             ) : <small className="locked-note">Approved task: documents are download-only.</small>}
           </div>
         </div>
+        </details>
       </article>
     );
   }
@@ -1886,8 +1992,8 @@ export function App() {
         </section>
 
         <section className="stats-grid" aria-label="Task allocation metrics">
-          <StatCard label="Active Tasks" value={String(openTasks)} icon={ClipboardList} tone="blue" />
-          <StatCard label="Needs Review" value={String(reviewTasks)} icon={CheckCircle2} tone="green" />
+          <StatCard label="Active Tasks" value={String(openTasks)} icon={ClipboardList} tone="blue" onClick={() => openTaskQueue(currentUser.role === "user" ? "assigned" : "all")} />
+          <StatCard label="Needs Review" value={String(reviewTasks)} icon={CheckCircle2} tone="green" onClick={canAllocateTasks ? () => openTaskQueue("review") : undefined} />
           <StatCard label="Overdue" value={String(overdueTasks)} icon={AlertTriangle} tone="red" />
           <StatCard label="Average Progress" value={`${averageProgress}%`} icon={Gauge} tone="amber" />
         </section>
@@ -1896,19 +2002,19 @@ export function App() {
           <section className="panel dashboard-work-queue">
             <div className="panel-header">
               <div><p>Live workload</p><h2>Priority Work Queue</h2></div>
-              <button className="ghost-button" onClick={() => setActiveView("tasks")} type="button">View all</button>
+              <button className="ghost-button" onClick={() => openTaskQueue(currentUser.role === "user" ? "assigned" : "all")} type="button">View all</button>
             </div>
             <div className="dashboard-task-list">
-              {activeTasks.slice(0, 6).map((task) => (
-                <button className="dashboard-task-row" key={`dashboard-${task.id}`} onClick={() => setActiveView("tasks")} type="button">
+              {dashboardTasks.slice(0, 6).map((task) => (
+                <button className="dashboard-task-row" key={`dashboard-${task.id}`} onClick={() => openTaskQueue(currentUser.role === "user" ? "assigned" : "all")} type="button">
                   <span className={`dashboard-priority priority-${task.priority}`} />
                   <span><strong>{task.title}</strong><small>{task.taskCode} · {task.projectName || task.department}</small></span>
                   <span className="dashboard-assignee">{task.candidateName || "Unassigned"}</span>
-                  <span className="dashboard-due">{task.dueDate}</span>
+                  <span className="dashboard-due">{task.dueDate || "Not started"}</span>
                   <strong className="dashboard-progress">{task.progress}%</strong>
                 </button>
               ))}
-              {!activeTasks.length ? <p className="empty-state">Everything is clear. No active tasks.</p> : null}
+              {!dashboardTasks.length ? <p className="empty-state">Everything is clear. No active tasks.</p> : null}
             </div>
           </section>
 
@@ -1917,6 +2023,7 @@ export function App() {
               <div className="panel-header"><div><p>Shortcuts</p><h2>Quick Actions</h2></div></div>
               <div className="quick-action-grid">
                 {canAllocateTasks ? <button onClick={() => setShowTaskComposer(true)} type="button"><Plus aria-hidden="true" size={18} /><span><strong>New task</strong><small>Assign work now</small></span></button> : null}
+                <button onClick={() => openTaskQueue("free")} type="button"><Hand aria-hidden="true" size={18} /><span><strong>Free tasks</strong><small>{freeActiveTasks.length} available</small></span></button>
                 <button onClick={() => setActiveView("projects")} type="button"><FolderKanban aria-hidden="true" size={18} /><span><strong>Projects</strong><small>{projects.length} available</small></span></button>
                 <button onClick={() => setActiveView("people")} type="button"><Users aria-hidden="true" size={18} /><span><strong>People</strong><small>{visibleUsers.length} visible</small></span></button>
                 <button onClick={() => void openDepartmentChat()} type="button"><MessageSquare aria-hidden="true" size={18} /><span><strong>Messages</strong><small>{chatChannels.length} channels</small></span></button>
@@ -2444,7 +2551,7 @@ export function App() {
                           </label>
                           <button className="icon-button danger" type="button" onClick={() => deleteProject(project)} aria-label={`Delete ${project.name}`}><Trash2 aria-hidden="true" size={16} /></button>
                         </div>
-                        <small className="import-hint">Columns: Task, Priority, Due Date, Progress, Task Type, Assignees (name or username).</small>
+                        <small className="import-hint">Columns: Task, Priority, Complexity (1–5), Due Date, Progress, Task Type, Assignees (name or username).</small>
                       </>
                     ) : null}
                   </article>
@@ -2456,15 +2563,47 @@ export function App() {
           <section className="panel page-panel" id="active-tasks-page">
             <div className="panel-header">
               <div>
-                <p>{currentUser.role === "superadmin" ? "All departments" : currentUser.department}</p>
-                <h2>Active Tasks</h2>
+                <p>{currentUser.role === "superadmin" ? "Organization work queue" : currentUser.department}</p>
+                <h2>{currentUser.role === "user" ? "My Active Tasks" : "Active Task Control"}</h2>
               </div>
-              <strong className="result-count">{activeTasks.length} active</strong>
+              <strong className="result-count">{activeTaskSectionTasks.length} shown</strong>
+            </div>
+            {currentUser.role === "user" ? (
+              <nav className="task-view-tabs" aria-label="Active task sections">
+                <button className={activeTaskSection === "assigned" ? "active" : ""} onClick={() => setActiveTaskSection("assigned")} type="button">
+                  <ClipboardList aria-hidden="true" size={17} />
+                  <span><strong>Assigned to me</strong><small>Tasks only you can work on</small></span>
+                  <b>{assignedActiveTasks.length}</b>
+                </button>
+                <button className={activeTaskSection === "free" ? "active" : ""} onClick={() => setActiveTaskSection("free")} type="button">
+                  <Hand aria-hidden="true" size={17} />
+                  <span><strong>Free tasks</strong><small>Available to take in your department</small></span>
+                  <b>{freeActiveTasks.length}</b>
+                </button>
+              </nav>
+            ) : (
+              <nav className="task-view-tabs manager-task-tabs" aria-label="Manager task filters">
+                <button className={managerTaskSection === "all" ? "active" : ""} onClick={() => setManagerTaskSection("all")} type="button">
+                  <ClipboardList aria-hidden="true" size={17} /><span><strong>All active</strong><small>Complete work queue</small></span><b>{activeTasks.length}</b>
+                </button>
+                <button className={managerTaskSection === "review" ? "active" : ""} onClick={() => setManagerTaskSection("review")} type="button">
+                  <CheckCircle2 aria-hidden="true" size={17} /><span><strong>Needs review</strong><small>Submitted by workers</small></span><b>{reviewTasks}</b>
+                </button>
+                <button className={managerTaskSection === "free" ? "active" : ""} onClick={() => setManagerTaskSection("free")} type="button">
+                  <Hand aria-hidden="true" size={17} /><span><strong>Unassigned</strong><small>Free or awaiting a claim</small></span><b>{freeActiveTasks.length}</b>
+                </button>
+              </nav>
+            )}
+            <div className="active-queue-heading">
+              <div><strong>{currentUser.role === "user" ? activeTaskSection === "free" ? "Available tasks" : "Your workload" : managerTaskSection === "review" ? "Review queue" : managerTaskSection === "free" ? "Unassigned work" : "Current work"}</strong><span>Sorted by priority and due date</span></div>
+              {canAllocateTasks ? <button className="primary-button" onClick={() => setShowTaskComposer(true)} type="button"><Plus aria-hidden="true" size={16} />New Task</button> : null}
             </div>
             <div className="task-list">
-              {activeTasks.length ? activeTasks.map((task) => renderTaskCard(task)) : (
-                <p className="empty-state">No active tasks match your access.</p>
-              )}
+              {activeTaskSectionTasks.length
+                ? activeTaskSectionTasks.map((task) => renderTaskCard(task))
+                : <p className="empty-state">{currentUser.role === "user"
+                  ? activeTaskSection === "free" ? "There are no free tasks in your department right now." : "No active tasks are assigned to you."
+                  : managerTaskSection === "review" ? "No tasks are waiting for review." : managerTaskSection === "free" ? "No tasks are currently unassigned." : "There are no active tasks."}</p>}
             </div>
           </section>
         ) : activeView === "people" ? (
@@ -2506,16 +2645,49 @@ export function App() {
             <div className="directory-grid">
               {visibleUsers.map((user) => {
                 const metrics = user.role === "user" ? userMetrics(user.id) : null;
+                const isEditing = editingUserId === user.id && editDraft;
+                const canEditPerson = currentUser.role === "superadmin" || (
+                  currentUser.role === "admin" && user.role === "user" && sameDepartment(user.department, currentUser.department)
+                );
+                const canDeletePerson = canEditPerson && user.id !== currentUser.id && user.role !== "superadmin";
                 return (
                   <article className="directory-card" key={`people-${user.id}`}>
-                    <div className="member-heading">
-                      <div><strong>{user.name}</strong><p>{user.username}</p></div>
-                      <span>{roleLabels[user.role]}</span>
-                    </div>
-                    <div className="user-line">
-                      <span>{user.department}</span>
-                      {metrics ? <span>{metrics.active} active tasks</span> : <span>Management access</span>}
-                    </div>
+                    {isEditing ? (
+                      <div className="directory-edit-form">
+                        <div className="directory-edit-heading"><div><p>Edit user</p><h3>{user.name}</h3></div><Edit3 aria-hidden="true" size={18} /></div>
+                        <label>Full name<input onChange={(event) => setEditDraft({ ...editDraft, name: event.target.value })} value={editDraft.name} /></label>
+                        <label>Email / username<input onChange={(event) => setEditDraft({ ...editDraft, username: event.target.value })} type="email" value={editDraft.username} /></label>
+                        <label>New password <small>Leave blank to keep the current password</small><input onChange={(event) => setEditDraft({ ...editDraft, password: event.target.value })} placeholder="Unchanged" type="password" value={editDraft.password} /></label>
+                        {currentUser.role === "superadmin" ? (
+                          <div className="directory-edit-grid">
+                            <label>Role<select onChange={(event) => {
+                              const role = event.target.value as UserRole;
+                              setEditDraft({ ...editDraft, role, department: role === "superadmin" ? "Executive" : editDraft.department === "Executive" ? departments[0] : editDraft.department });
+                            }} value={editDraft.role}><option value="user">Normal User</option><option value="admin">Admin</option><option value="superadmin">Super Admin</option></select></label>
+                            <label>Department<select disabled={editDraft.role === "superadmin"} onChange={(event) => setEditDraft({ ...editDraft, department: event.target.value as DepartmentName })} value={editDraft.department}>
+                              {editDraft.role === "superadmin" ? <option value="Executive">Executive</option> : departments.map((department) => <option key={department} value={department}>{department}</option>)}
+                            </select></label>
+                          </div>
+                        ) : null}
+                        <div className="directory-edit-actions">
+                          <button className="ghost-button" onClick={() => { setEditingUserId(null); setEditDraft(null); }} type="button"><X aria-hidden="true" size={16} />Cancel</button>
+                          <button className="primary-button" onClick={saveEditUser} type="button"><Save aria-hidden="true" size={16} />Save Changes</button>
+                        </div>
+                      </div>
+                    ) : <>
+                      <div className="member-heading">
+                        <div><strong>{user.name}</strong><p>{user.username}</p></div>
+                        <span>{roleLabels[user.role]}</span>
+                      </div>
+                      <div className="user-line">
+                        <span>{user.department}</span>
+                        {metrics ? <span>{metrics.active} active tasks</span> : <span>Management access</span>}
+                      </div>
+                      {canEditPerson ? <div className="directory-card-actions">
+                        <button className="ghost-button" onClick={() => startEditUser(user)} type="button"><Edit3 aria-hidden="true" size={15} />Edit User</button>
+                        {canDeletePerson ? <button className="icon-button danger" onClick={() => deleteUser(user.id)} type="button" aria-label={`Delete ${user.name}`}><Trash2 aria-hidden="true" size={15} /></button> : null}
+                      </div> : null}
+                    </>}
                   </article>
                 );
               })}
@@ -2549,11 +2721,11 @@ export function App() {
                     <section className="department-group" key={department}>
                       <div className="department-heading"><h3>{department}</h3><span>{candidates.length} candidates</span></div>
                       <div className="team-table-wrap"><table className="analytics-table">
-                        <thead><tr><th>Candidate</th><th>Active now</th><th>Total assigned</th><th>Finished in month</th><th>Avg. cycle time</th><th>On time</th><th>Report</th></tr></thead>
+                        <thead><tr><th>Candidate</th><th>Active now</th><th>Active load</th><th>Total assigned</th><th>Finished in month</th><th>Avg. cycle time</th><th>On time</th><th>Report</th></tr></thead>
                         <tbody>{candidates.length ? candidates.map((user) => {
                           const metrics = userMetrics(user.id);
-                          return <tr key={`team-${user.id}`}><td><strong>{user.name}</strong><small>{user.username}</small></td><td>{metrics.active}</td><td>{metrics.assigned}</td><td>{metrics.completedInMonth}</td><td>{metrics.completed ? `${metrics.averageCompletionDays.toFixed(1)} days` : "—"}</td><td>{metrics.completed ? `${Math.round(metrics.onTimeRate * 100)}%` : "—"}</td><td><button className="icon-button" type="button" onClick={() => downloadProductivityReport(user.id, teamMonth)} title={`Download ${teamMonth} report`}><Download aria-hidden="true" size={15} /></button></td></tr>;
-                        }) : <tr><td colSpan={7}>No normal users in this department.</td></tr>}</tbody>
+                          return <tr key={`team-${user.id}`}><td><strong>{user.name}</strong><small>{user.username}</small></td><td>{metrics.active}</td><td>{metrics.activeComplexity} pts</td><td>{metrics.assigned}</td><td>{metrics.completedInMonth}</td><td>{metrics.completed ? `${metrics.averageCompletionDays.toFixed(1)} days` : "—"}</td><td>{metrics.completed ? `${Math.round(metrics.onTimeRate * 100)}%` : "—"}</td><td><button className="icon-button" type="button" onClick={() => downloadProductivityReport(user.id, teamMonth)} title={`Download ${teamMonth} report`}><Download aria-hidden="true" size={15} /></button></td></tr>;
+                        }) : <tr><td colSpan={8}>No normal users in this department.</td></tr>}</tbody>
                       </table></div>
                     </section>
                   );
@@ -2582,6 +2754,8 @@ export function App() {
                       <span><strong>{metrics.overdue}</strong>Overdue</span>
                       <span><strong>{metrics.averageProgress}%</strong>Avg. progress</span>
                       <span><strong>{metrics.active}</strong>Active now</span>
+                      <span><strong>{metrics.activeComplexity}</strong>Active complexity</span>
+                      <span><strong>{metrics.completedComplexity}</strong>Completed points</span>
                     </div>
                     <button className="ghost-button" type="button" onClick={() => downloadProductivityReport(user.id, productivityMonth)}>
                       <Download aria-hidden="true" size={16} /> Download {productivityMonth || "All-time"} Excel
@@ -2816,10 +2990,10 @@ export function App() {
                   <div className="archive-task-details">
                     <div><span>Department</span><strong>{task.department}</strong></div>
                     <div><span>Task type</span><strong>{task.taskType}</strong></div>
-                    <div><span>Due date</span><strong>{task.dueDate}</strong></div>
+                    <div><span>Due date</span><strong>{task.dueDate || "Not scheduled"}</strong></div>
                     <div><span>Final progress</span><strong>{task.progress}%</strong></div>
-                    <div><span>Comments</span><strong>{task.messages.length}</strong></div>
-                    <div><span>Documents</span><strong>{task.files.length}</strong></div>
+                    <div><span>Complexity</span><strong>{complexityPoints(task)}/5</strong></div>
+                    <div><span>Started</span><strong>{task.startedAt ? new Date(task.startedAt).toLocaleDateString("en-GB") : "Not recorded"}</strong></div>
                   </div>
                   {task.reviewComment ? <p className="archive-review-note"><strong>Final review</strong>{task.reviewComment}</p> : null}
                   {task.files.length ? <div className="archive-files">{task.files.map((file) => <button className="file-download" key={file.id} onClick={() => downloadTaskFile(file)} type="button"><span><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span><Download aria-hidden="true" size={15} /></button>)}</div> : null}
@@ -2868,8 +3042,9 @@ export function App() {
               <div className="task-composer-grid">
                 <label>Task type<select onChange={(event) => setTaskDraft((draft) => ({ ...draft, taskType: event.target.value as TaskType }))} value={taskDraft.taskType}>{taskTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
                 <label>Priority<select onChange={(event) => setTaskDraft((draft) => ({ ...draft, priority: event.target.value as TaskPriority }))} value={taskDraft.priority}><option value="low">Low priority</option><option value="medium">Medium priority</option><option value="high">High priority</option><option value="urgent">Urgent priority</option></select></label>
-                <label>Due date<input onChange={(event) => setTaskDraft((draft) => ({ ...draft, dueDate: event.target.value }))} type="date" value={taskDraft.dueDate} /></label>
-                <label>Initial progress<input max="100" min="0" onChange={(event) => setTaskDraft((draft) => ({ ...draft, progress: Number(event.target.value) }))} type="number" value={taskDraft.progress} /></label>
+                <label>Complexity <small>Manager-selected workload score; unrelated to duration</small><select onChange={(event) => setTaskDraft((draft) => ({ ...draft, complexity: Number(event.target.value) }))} value={taskDraft.complexity}>{[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value} / 5 · {complexityLabels[value]}</option>)}</select></label>
+                <label>Planned due date <small>{taskDraft.assigneeIds.length ? "Optional and set independently by the manager" : "Available after a user is assigned"}</small><input disabled={!taskDraft.assigneeIds.length} onChange={(event) => setTaskDraft((draft) => ({ ...draft, dueDate: event.target.value }))} type="date" value={taskDraft.assigneeIds.length ? taskDraft.dueDate : ""} /></label>
+                <label>Initial progress<input disabled={!taskDraft.assigneeIds.length} max="100" min="0" onChange={(event) => setTaskDraft((draft) => ({ ...draft, progress: Number(event.target.value) }))} type="number" value={taskDraft.assigneeIds.length ? taskDraft.progress : 0} /></label>
               </div>
               <label className="file-upload task-create-files"><Paperclip aria-hidden="true" size={16} />Add task documents<input multiple onChange={(event) => setTaskFiles(Array.from(event.target.files ?? []))} type="file" /></label>
               {taskFiles.length ? <p className="selected-files">{taskFiles.map((file) => file.name).join(", ")}</p> : null}
@@ -2884,17 +3059,17 @@ export function App() {
       ) : null}
       {confirmation ? (
         <div className="confirmation-backdrop" role="presentation" onMouseDown={() => setConfirmation(null)}>
-          <section className="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-confirmation-title" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="confirmation-icon"><AlertTriangle aria-hidden="true" size={24} /></div>
-            <h2 id="delete-confirmation-title">Confirm deletion</h2>
+          <section className="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className={`confirmation-icon ${confirmation.danger ? "" : "safe"}`}>{confirmation.danger ? <AlertTriangle aria-hidden="true" size={24} /> : <CheckCircle2 aria-hidden="true" size={24} />}</div>
+            <h2 id="confirmation-title">{confirmation.title}</h2>
             <p>{confirmation.message}</p>
             <div className="confirmation-actions">
               <button className="ghost-button" type="button" onClick={() => setConfirmation(null)}>Cancel</button>
-              <button className="danger-button" type="button" onClick={() => {
+              <button className={confirmation.danger ? "danger-button" : "primary-button"} type="button" onClick={() => {
                 const action = confirmation.onConfirm;
                 setConfirmation(null);
                 void action();
-              }}>Yes, delete</button>
+              }}>{confirmation.confirmLabel}</button>
             </div>
           </section>
         </div>
