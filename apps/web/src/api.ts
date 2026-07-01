@@ -45,6 +45,7 @@ export type ManagedTask = {
   projectName?: string;
   taskType: TaskType;
   complexity: number;
+  reopenCount: number;
   startedAt?: string;
   dueDate: string;
   progress: number;
@@ -55,6 +56,14 @@ export type ManagedTask = {
   updatedAt: string;
   files: TaskFile[];
   messages: TaskMessage[];
+};
+
+export type PerformanceTask = Pick<ManagedTask, "id" | "department" | "status" | "complexity" | "startedAt" | "createdAt" | "completedAtIso" | "dueDate" | "assigneeIds" | "reopenCount">;
+
+export type AttendanceProfile = {
+  userId: string;
+  employmentStart: string;
+  records: Array<{ workDate: string; firstLoginAt?: string; lastLoginAt?: string; loginCount: number }>;
 };
 
 export type Project = {
@@ -73,6 +82,7 @@ export type AppNotification = {
   title: string;
   body: string;
   taskId?: string;
+  channelId?: string;
   isRead: boolean;
   createdAt: string;
 };
@@ -129,6 +139,8 @@ export type BootstrapData = {
   departments: DepartmentName[];
   users: AppUser[];
   tasks: ManagedTask[];
+  performanceTasks: PerformanceTask[];
+  attendanceProfiles: AttendanceProfile[];
   projects: Project[];
   notifications: AppNotification[];
   todos: TodoItem[];
@@ -275,7 +287,7 @@ export const api = {
     request(`/api/users/${user.id}`, { method: "PUT", body: JSON.stringify(user) }),
   deleteUser: (userId: string) => request(`/api/users/${userId}`, { method: "DELETE" }),
   async createTask(
-    task: Omit<ManagedTask, "id" | "taskCode" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso" | "startedAt" | "workerApprovals" | "pendingApprovalNames">,
+    task: Omit<ManagedTask, "id" | "taskCode" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso" | "startedAt" | "workerApprovals" | "pendingApprovalNames" | "reopenCount">,
     files: File[] = []
   ) {
     return request("/api/tasks", {

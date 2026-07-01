@@ -28,6 +28,7 @@ import {
   ShieldCheck,
   Sparkles,
   Sun,
+  Trophy,
   Trash2,
   Upload,
   UserPlus,
@@ -36,7 +37,7 @@ import {
 } from "lucide-react";
 import type { AppUser, DepartmentName, TaskPriority, TaskStatus, TaskType, UserRole } from "@mab/shared";
 import { api, getLastActivity, hasSession, inactivityLimitMs, markActivity } from "./api";
-import type { AppNotification, ChatChannel, ChatMessage, ChatMessageFile, ManagedTask, Project, TodoItem } from "./api";
+import type { AppNotification, AttendanceProfile, ChatChannel, ChatMessage, ChatMessageFile, ManagedTask, PerformanceTask, Project, TodoItem } from "./api";
 import { StatCard } from "./components/StatCard";
 
 const mabLogo = "/mab-logo.jpeg";
@@ -89,6 +90,8 @@ const viewTitles = {
   people: "People Directory",
   team: "Team Performance",
   productivity: "Productivity",
+  achievements: "Achievements",
+  attendance: "Attendance",
   chat: "Department Chat"
 } as const;
 
@@ -146,7 +149,7 @@ function relativeChatDayLabel(dayLabel: string) {
   return dayLabel;
 }
 
-function completionDays(task: ManagedTask) {
+function completionDays(task: Pick<PerformanceTask, "completedAtIso" | "startedAt" | "createdAt">) {
   if (!task.completedAtIso) return null;
   const duration = (new Date(task.completedAtIso).getTime() - new Date(task.startedAt ?? task.createdAt).getTime()) / 86_400_000;
   return Number.isFinite(duration) && duration >= 0 ? duration : null;
@@ -154,6 +157,19 @@ function completionDays(task: ManagedTask) {
 
 function average(values: number[]) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function median(values: number[]) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((first, second) => first - second);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function currentRiyadhDate() {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Riyadh", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
 }
 
 function identityColor(id?: string | null, currentUserId?: string) {
@@ -404,6 +420,8 @@ export function App() {
   const [users, setUsers] = useState<AppUser[]>([]);
   const [departments, setDepartments] = useState<DepartmentName[]>(defaultDepartments);
   const [tasks, setTasks] = useState<ManagedTask[]>([]);
+  const [performanceTasks, setPerformanceTasks] = useState<PerformanceTask[]>([]);
+  const [attendanceProfiles, setAttendanceProfiles] = useState<AttendanceProfile[]>([]);
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
@@ -411,6 +429,7 @@ export function App() {
   const [chatChannels, setChatChannels] = useState<ChatChannel[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const chatMessageListRef = useRef<HTMLDivElement | null>(null);
+  const chatParticipantsRef = useRef<HTMLDetailsElement | null>(null);
   const [selectedChannelId, setSelectedChannelId] = useState("");
   const [chatDraft, setChatDraft] = useState("");
   const [chatStatus, setChatStatus] = useState("");
@@ -432,7 +451,7 @@ export function App() {
     { role: "assistant", text: "Hello! I’m the MAB AI assistant. Ask me to help organize work, draft a task update, summarize an issue, or plan your day." }
   ]);
   const [activeView, setActiveView] = useState<
-    "dashboard" | "projects" | "tasks" | "todos" | "finished" | "people" | "team" | "productivity" | "chat"
+    "dashboard" | "projects" | "tasks" | "todos" | "finished" | "people" | "team" | "productivity" | "achievements" | "attendance" | "chat"
   >("dashboard");
   const [activeTaskSection, setActiveTaskSection] = useState<"assigned" | "free">("assigned");
   const [managerTaskSection, setManagerTaskSection] = useState<"all" | "review" | "free">("all");
@@ -505,6 +524,9 @@ export function App() {
   const [teamDepartment, setTeamDepartment] = useState("");
   const [teamMonth, setTeamMonth] = useState(new Date().toISOString().slice(0, 7));
   const [productivityMonth, setProductivityMonth] = useState("");
+  const [achievementMonth, setAchievementMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [achievementDepartment, setAchievementDepartment] = useState("");
+  const [attendanceMonth, setAttendanceMonth] = useState(new Date().toISOString().slice(0, 7));
   const [todoDraft, setTodoDraft] = useState({ title: "", taskId: "" });
   const [todoFilter, setTodoFilter] = useState<"all" | "open" | "completed">("all");
   const [todoMessage, setTodoMessage] = useState("");
@@ -560,6 +582,8 @@ export function App() {
       setDepartments(data.departments?.length ? data.departments : defaultDepartments);
       setUsers(data.users);
       setTasks(data.tasks);
+      setPerformanceTasks(data.performanceTasks ?? []);
+      setAttendanceProfiles(data.attendanceProfiles ?? []);
       setTodos(data.todos);
       setProjects(data.projects);
       setNotifications(data.notifications);
@@ -819,6 +843,41 @@ export function App() {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [showChatPanel, selectedChannelId, newestSelectedChatMessageId]);
+
+  useEffect(() => {
+    function closeOpenPopovers(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+
+      if (showNotifications && !target.closest(".notification-center")) setShowNotifications(false);
+
+      const participants = chatParticipantsRef.current;
+      if (participants?.open && !participants.contains(target)) participants.open = false;
+
+      if (showGroupForm && !target.closest(".chat-group-form") && !target.closest(".chat-create-group-button")) {
+        setShowGroupForm(false);
+      }
+
+      if (showAiAssistant && !target.closest(".ai-assistant") && !target.closest(".ai-toggle-button")) {
+        setShowAiAssistant(false);
+      }
+
+      if (
+        showChatPanel &&
+        !target.closest("#department-chat") &&
+        !target.closest(".chat-launcher") &&
+        !target.closest(".notification-center") &&
+        !target.closest(".confirmation-backdrop")
+      ) {
+        setShowChatPanel(false);
+        setShowGroupForm(false);
+        setShowAiAssistant(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", closeOpenPopovers);
+    return () => document.removeEventListener("pointerdown", closeOpenPopovers);
+  }, [showAiAssistant, showChatPanel, showGroupForm, showNotifications]);
   const canDeleteSelectedChatGroup = Boolean(selectedChatChannel?.isGroup && (
     currentUser?.role === "superadmin" ||
     (currentUser?.role === "admin" && selectedChatChannel.department === currentUser.department)
@@ -834,6 +893,125 @@ export function App() {
     setChatDraft((draft) => draft.replace(/@([^@\[\]\n]*)$/, `@[${user.name}] `));
   }
 
+  function attendanceMetrics(userId: string, month = "") {
+    const profile = attendanceProfiles.find((item) => item.userId === userId);
+    const today = currentRiyadhDate();
+    const allDates = attendanceProfiles.flatMap((item) => item.records.map((record) => record.workDate)).sort();
+    const trackingStart = allDates[0] ?? today;
+    const requestedStart = /^\d{4}-\d{2}$/.test(month) ? `${month}-01` : trackingStart;
+    const requestedEnd = /^\d{4}-\d{2}$/.test(month)
+      ? new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10)
+      : today;
+    const startCandidates = [requestedStart, trackingStart, profile?.employmentStart ?? trackingStart].sort();
+    const start = startCandidates[startCandidates.length - 1] ?? requestedStart;
+    const end = requestedEnd < today ? requestedEnd : today;
+    let expectedDays = 0;
+    if (start <= end) {
+      const cursor = new Date(`${start}T00:00:00Z`);
+      const last = new Date(`${end}T00:00:00Z`);
+      while (cursor <= last) {
+        const day = cursor.getUTCDay();
+        if (day !== 5) expectedDays += 1;
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+    }
+    const records = profile?.records.filter((record) => record.workDate >= start && record.workDate <= end) ?? [];
+    const presentDays = records.filter((record) => {
+      const day = new Date(`${record.workDate}T00:00:00Z`).getUTCDay();
+      return day !== 5;
+    }).length;
+    return {
+      expectedDays,
+      presentDays,
+      attendanceRate: expectedDays ? Math.min(1, presentDays / expectedDays) : 0,
+      totalLogins: records.reduce((sum, record) => sum + record.loginCount, 0),
+      lastSeen: records[0]?.lastLoginAt
+    };
+  }
+
+  function performanceMetrics(userId: string, month = "") {
+    const user = users.find((candidate) => candidate.id === userId);
+    const assigned = performanceTasks.filter((task) => task.assigneeIds.includes(userId));
+    const completed = assigned.filter((task) => task.status === "done" && (!month || task.completedAtIso?.startsWith(month)));
+    const departmentCompleted = performanceTasks.filter((task) =>
+      task.status === "done" &&
+      (!user || sameDepartment(task.department, user.department)) &&
+      (!month || task.completedAtIso?.startsWith(month))
+    );
+    let earnedPoints = 0;
+    let basePoints = 0;
+    let speedTotal = 0;
+    let teamworkTasks = 0;
+    let onTimeTasks = 0;
+    let reopenTotal = 0;
+
+    for (const task of completed) {
+      const complexity = complexityPoints(task);
+      const duration = completionDays(task);
+      const comparableDurations = departmentCompleted
+        .filter((candidate) => complexityPoints(candidate) === complexity)
+        .map(completionDays)
+        .filter((value): value is number => value !== null && value > 0);
+      const broaderDurations = departmentCompleted.map(completionDays).filter((value): value is number => value !== null && value > 0);
+      const benchmark = comparableDurations.length >= 3 ? median(comparableDurations) : median(broaderDurations);
+      const speedFactor = duration !== null && duration > 0 && benchmark > 0
+        ? Math.min(1.4, Math.max(0.6, benchmark / Math.max(duration, 0.25)))
+        : 1;
+      const qualityFactor = Math.max(0.45, 1 - (task.reopenCount ?? 0) * 0.18);
+      const onTime = Boolean(task.completedAtIso && task.dueDate && task.completedAtIso.slice(0, 10) <= task.dueDate);
+      const timelinessFactor = task.dueDate ? (onTime ? 1.1 : 0.88) : 1;
+      const teamSize = Math.max(1, task.assigneeIds.length);
+      const collaborationFactor = teamSize > 1 ? Math.min(1.2, 1 + (teamSize - 1) * 0.08) : 1;
+      const contributionFactor = 1 / Math.sqrt(teamSize);
+      const base = complexity * 20;
+      basePoints += base;
+      earnedPoints += base * speedFactor * qualityFactor * timelinessFactor * collaborationFactor * contributionFactor;
+      speedTotal += speedFactor;
+      reopenTotal += task.reopenCount ?? 0;
+      if (onTime) onTimeTasks += 1;
+      if (teamSize > 1) teamworkTasks += 1;
+    }
+
+    const rawEfficiency = basePoints ? Math.min(120, (earnedPoints / basePoints) * 100) : 0;
+    const confidence = completed.length / (completed.length + 3);
+    const deliveryIndex = completed.length ? Math.round(50 + confidence * (rawEfficiency - 50)) : 0;
+    const attendance = attendanceMetrics(userId, month);
+    const productivityIndex = completed.length
+      ? Math.round(deliveryIndex * 0.85 + (attendance.expectedDays ? attendance.attendanceRate * 100 : deliveryIndex) * 0.15)
+      : 0;
+    const strongOutput = earnedPoints / 2 >= 100 && reopenTotal === 0;
+    const status = completed.length < 2
+      ? "Building history"
+      : productivityIndex >= 85
+        ? "Outstanding"
+        : productivityIndex >= 70
+          ? "Strong"
+          : productivityIndex >= 55 || strongOutput
+            ? "Developing"
+            : "Needs support";
+    const evaluationReasons = [
+      completed.length ? `${Math.round((speedTotal / completed.length) * 100)}% speed versus comparable work` : "No completed work in this period",
+      `${reopenTotal} reopen${reopenTotal === 1 ? "" : "s"}`,
+      attendance.expectedDays ? `${Math.round(attendance.attendanceRate * 100)}% attendance` : "Attendance baseline is still forming",
+      `${Math.round(earnedPoints / 2)} complexity-weighted achievement points`
+    ];
+    return {
+      completed: completed.length,
+      complexityDelivered: completed.reduce((sum, task) => sum + complexityPoints(task), 0),
+      achievementPoints: Math.round(earnedPoints / 2),
+      productivityIndex,
+      deliveryIndex,
+      attendance,
+      averageSpeedFactor: completed.length ? speedTotal / completed.length : 0,
+      teamworkTasks,
+      onTimeRate: completed.length ? onTimeTasks / completed.length : 0,
+      reopenTotal,
+      reopenRate: completed.length ? reopenTotal / completed.length : 0,
+      status,
+      evaluationReasons
+    };
+  }
+
   function userMetrics(userId: string, month = "") {
     const assigned = tasks.filter((task) => task.assigneeIds.includes(userId));
     const inPeriod = month
@@ -846,6 +1024,7 @@ export function App() {
     const assignedComplexity = inPeriod.reduce((sum, task) => sum + complexityPoints(task), 0);
     const activeComplexity = assigned.filter((task) => task.status !== "done").reduce((sum, task) => sum + complexityPoints(task), 0);
     const completedComplexity = completed.reduce((sum, task) => sum + complexityPoints(task), 0);
+    const performance = performanceMetrics(userId, month);
     return {
       assigned: inPeriod.length,
       active: assigned.filter((task) => task.status !== "done").length,
@@ -860,7 +1039,8 @@ export function App() {
       completedComplexity,
       averageCompletionDays: average(durations),
       completionRate: assignedComplexity ? completedComplexity / assignedComplexity : 0,
-      onTimeRate: completed.length ? onTime.length / completed.length : 0
+      onTimeRate: completed.length ? onTime.length / completed.length : 0,
+      performance
     };
   }
 
@@ -871,6 +1051,8 @@ export function App() {
       setCurrentUser(null);
       setUsers([]);
       setTasks([]);
+      setPerformanceTasks([]);
+      setAttendanceProfiles([]);
       setTodos([]);
       setProjects([]);
       setNotifications([]);
@@ -886,6 +1068,8 @@ export function App() {
       setCurrentUser(null);
       setUsers([]);
       setTasks([]);
+      setPerformanceTasks([]);
+      setAttendanceProfiles([]);
       setTodos([]);
       setProjects([]);
       setNotifications([]);
@@ -912,8 +1096,8 @@ export function App() {
     void api.markChatRead(channelId).catch(() => undefined);
   }
 
-  async function openDepartmentChat() {
-    if (showChatPanel) {
+  async function openDepartmentChat(preferredChannelId?: string) {
+    if (showChatPanel && !preferredChannelId) {
       setShowChatPanel(false);
       return;
     }
@@ -923,12 +1107,37 @@ export function App() {
       const data = await api.loadChat();
       setChatChannels(data.chatChannels);
       setChatMessages(data.chatMessages);
+      const preferredChannel = preferredChannelId ? data.chatChannels.find((channel) => channel.id === preferredChannelId) : undefined;
       const departmentChannel = data.chatChannels.find((channel) =>
         !channel.isGroup && !channel.isDirect && (currentUser?.role === "superadmin" || channel.department === currentUser?.department));
-      selectChatChannel(departmentChannel?.id ?? data.chatChannels[0]?.id ?? "");
+      selectChatChannel(preferredChannel?.id ?? departmentChannel?.id ?? data.chatChannels[0]?.id ?? "");
     } catch (error) {
       setChatStatus(error instanceof Error ? error.message : "Could not open Department Chat.");
     }
+  }
+
+  function openNotificationTarget(notification: AppNotification) {
+    setShowNotifications(false);
+    if (notification.channelId) {
+      void openDepartmentChat(notification.channelId);
+      return;
+    }
+    if (notification.taskId) {
+      setShowChatPanel(false);
+      const task = tasks.find((item) => item.id === notification.taskId);
+      if (task?.status === "done") setActiveView("finished");
+      else {
+        setActiveView("tasks");
+        if (currentUser?.role === "user") setActiveTaskSection("assigned");
+        else setManagerTaskSection(task?.status === "under_review" ? "review" : "all");
+      }
+      window.setTimeout(() => {
+        document.getElementById(`task-${notification.taskId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 100);
+      return;
+    }
+    if (["user", "people"].includes(notification.kind)) setActiveView("people");
+    else setActiveView("dashboard");
   }
 
   function startReplyToChatMessage(message: ChatMessage) {
@@ -1681,7 +1890,7 @@ export function App() {
     const overdue = isTaskOverdue(task);
 
     return (
-      <article className={`task-card task-card-priority-${task.priority}`} key={`${view}-${task.id}`}>
+      <article className={`task-card task-card-priority-${task.priority}`} id={`task-${task.id}`} key={`${view}-${task.id}`}>
         <div className="task-row">
           {isEditingTask ? (
             <div className="edit-task-panel">
@@ -2202,7 +2411,7 @@ export function App() {
               <div>
                 <p>{selectedChatChannel?.isDirect ? `Private message · ${selectedChatChannel.department}` : selectedChatChannel?.department ?? currentUser.department}</p>
                 <h2>{selectedChatChannel?.name ?? "Department Chat"}</h2>
-                <details className="chat-participants">
+                <details className="chat-participants" ref={chatParticipantsRef}>
                   <summary>
                     <span className="chat-participant-stack" aria-hidden="true">
                       {selectedChatParticipants.slice(0, 4).map((user) => <i key={user.id} style={{ background: identityColor(user.id, currentUser.id) }}>{initials(user.name)}</i>)}
@@ -2258,7 +2467,7 @@ export function App() {
                     </button>
                   ) : null}
                   <button
-                    className="ghost-button"
+                    className="ghost-button chat-create-group-button"
                     onClick={() => setShowGroupForm((visible) => !visible)}
                     type="button"
                   >
@@ -2522,7 +2731,11 @@ export function App() {
             <span>{roleLabels[currentUser.role]}</span>
           </div>
         </div>
-        <p className="sidebar-nav-label">Workspace</p>
+        <div className="sidebar-context" title={currentUser.department}>
+          <span><Building2 aria-hidden="true" size={15} /></span>
+          <div><small>Current department</small><strong>{currentUser.department}</strong></div>
+        </div>
+        <p className="sidebar-nav-label">Main navigation</p>
         <nav>
           <button
             type="button"
@@ -2567,6 +2780,22 @@ export function App() {
             <Archive aria-hidden="true" size={17} />
             Finished Tasks
             <span>{finishedTasks.length}</span>
+          </button>
+          <button
+            type="button"
+            className={`sidebar-nav-button ${activeView === "achievements" ? "active" : ""}`}
+            onClick={() => setActiveView("achievements")}
+          >
+            <Trophy aria-hidden="true" size={17} />
+            Achievements
+          </button>
+          <button
+            type="button"
+            className={`sidebar-nav-button ${activeView === "attendance" ? "active" : ""}`}
+            onClick={() => setActiveView("attendance")}
+          >
+            <Calendar aria-hidden="true" size={17} />
+            Attendance
           </button>
           <button
             type="button"
@@ -2654,11 +2883,11 @@ export function App() {
                   </div>
                   <div className="notification-list">
                     {notifications.length ? notifications.map((notification) => (
-                      <article key={notification.id} className={notification.isRead ? "" : "unread"}>
+                      <button key={notification.id} className={notification.isRead ? "" : "unread"} onClick={() => openNotificationTarget(notification)} type="button">
                         <strong>{notification.title}</strong>
                         <p>{notification.body}</p>
-                        <span>{notification.createdAt}</span>
-                      </article>
+                        <span>{notification.createdAt} · Open</span>
+                      </button>
                     )) : <p className="empty-state">No notifications yet.</p>}
                   </div>
                 </div>
@@ -3429,10 +3658,10 @@ export function App() {
                     <section className="department-group" key={department}>
                       <div className="department-heading"><h3>{department}</h3><span>{candidates.length} candidates</span></div>
                       <div className="team-table-wrap"><table className="analytics-table">
-                        <thead><tr><th>Candidate</th><th>Active now</th><th>Active load</th><th>Total assigned</th><th>Finished in month</th><th>Avg. cycle time</th><th>On time</th><th>Report</th></tr></thead>
+                        <thead><tr><th>Candidate</th><th>Productivity index</th><th>Achievement points</th><th>Active load</th><th>Finished in month</th><th>Avg. cycle time</th><th>Reopens</th><th>Report</th></tr></thead>
                         <tbody>{candidates.length ? candidates.map((user) => {
                           const metrics = userMetrics(user.id);
-                          return <tr key={`team-${user.id}`}><td><strong>{user.name}</strong><small>{user.username}</small></td><td>{metrics.active}</td><td>{metrics.activeComplexity} pts</td><td>{metrics.assigned}</td><td>{metrics.completedInMonth}</td><td>{metrics.completed ? `${metrics.averageCompletionDays.toFixed(1)} days` : "—"}</td><td>{metrics.completed ? `${Math.round(metrics.onTimeRate * 100)}%` : "—"}</td><td><button className="icon-button" type="button" onClick={() => downloadProductivityReport(user.id, teamMonth)} title={`Download ${teamMonth} report`}><Download aria-hidden="true" size={15} /></button></td></tr>;
+                          return <tr key={`team-${user.id}`}><td><strong>{user.name}</strong><small>{user.username}</small></td><td><strong>{metrics.performance.productivityIndex || "—"}</strong><small>{metrics.performance.status}</small></td><td>{metrics.performance.achievementPoints}</td><td>{metrics.activeComplexity} pts</td><td>{metrics.completedInMonth}</td><td>{metrics.completed ? `${metrics.averageCompletionDays.toFixed(1)} days` : "—"}</td><td>{metrics.performance.reopenTotal}</td><td><button className="icon-button" type="button" onClick={() => downloadProductivityReport(user.id, teamMonth)} title={`Download ${teamMonth} report`}><Download aria-hidden="true" size={15} /></button></td></tr>;
                         }) : <tr><td colSpan={8}>No normal users in this department.</td></tr>}</tbody>
                       </table></div>
                     </section>
@@ -3440,7 +3669,106 @@ export function App() {
                 })}
             </div>
           </section>
-        ) : activeView === "productivity" ? (
+        ) : activeView === "attendance" ? (() => {
+          const candidates = currentUser.role === "user"
+            ? users.filter((user) => user.id === currentUser.id)
+            : productivityCandidates;
+          const rows = candidates.map((user) => ({ user, metrics: attendanceMetrics(user.id, attendanceMonth) }));
+          const presentToday = candidates.filter((user) => attendanceProfiles.find((profile) => profile.userId === user.id)?.records.some((record) => record.workDate === currentRiyadhDate())).length;
+          const averageRate = rows.length ? average(rows.map((row) => row.metrics.attendanceRate)) : 0;
+          return (
+            <section className="panel attendance-page" id="attendance-page">
+              <div className="attendance-header">
+                <div><span><Calendar aria-hidden="true" size={22} /></span><div><p>Riyadh workday attendance</p><h2>Attendance</h2><small>Presence is recorded once per day at the first successful login.</small></div></div>
+                <label>Attendance month<input type="month" value={attendanceMonth} onChange={(event) => setAttendanceMonth(event.target.value)} /></label>
+              </div>
+              <div className="attendance-summary">
+                <span><strong>{presentToday}</strong>Present today</span>
+                <span><strong>{candidates.length}</strong>Tracked employees</span>
+                <span><strong>{Math.round(averageRate * 100)}%</strong>Average attendance</span>
+                <span><strong>15%</strong>KPI weighting</span>
+              </div>
+              <div className="attendance-table-wrap">
+                <table className="attendance-table">
+                  <thead><tr><th>Employee</th><th>Department</th><th>Present days</th><th>Expected workdays</th><th>Attendance rate</th><th>Login sessions</th><th>Last login</th></tr></thead>
+                  <tbody>{rows.map(({ user, metrics }) => (
+                    <tr key={`attendance-${user.id}`}>
+                      <td><span className="achievement-person"><i style={{ background: identityColor(user.id, currentUser.id) }}>{initials(user.name)}</i><span><strong>{user.name}</strong><small>{user.username}</small></span></span></td>
+                      <td>{user.department}</td><td><strong>{metrics.presentDays}</strong></td><td>{metrics.expectedDays}</td>
+                      <td><span className="attendance-rate"><i style={{ width: `${Math.round(metrics.attendanceRate * 100)}%` }} /><strong>{Math.round(metrics.attendanceRate * 100)}%</strong></span></td>
+                      <td>{metrics.totalLogins}</td><td>{metrics.lastSeen ? new Date(metrics.lastSeen).toLocaleString("en-GB") : "No login recorded"}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+              <p className="attendance-note"><ShieldCheck aria-hidden="true" size={16} />Working days are Saturday–Thursday, with Friday off. Attendance starts from the later of employee creation or system attendance tracking; future days are never counted as absences.</p>
+            </section>
+          );
+        })() : activeView === "achievements" ? (() => {
+          const availableDepartments = departments.filter((department) => department !== "Executive");
+          const selectedDepartment = currentUser.role === "superadmin"
+            ? achievementDepartment || availableDepartments[0] || ""
+            : currentUser.department;
+          const leaderboard = users
+            .filter((user) => user.role === "user" && sameDepartment(user.department, selectedDepartment))
+            .map((user) => ({ user, metrics: performanceMetrics(user.id, achievementMonth) }))
+            .sort((first, second) => second.metrics.achievementPoints - first.metrics.achievementPoints || second.metrics.productivityIndex - first.metrics.productivityIndex);
+          return (
+            <section className="panel achievements-page" id="achievements-page">
+              <header className="achievements-hero">
+                <div><span><Trophy aria-hidden="true" size={24} /></span><div><p>Department performance race</p><h2>Monthly Achievements</h2><small>Fair scoring rewards difficult work, reliable quality, speed, and collaboration—not task count alone.</small></div></div>
+                <div className="achievement-controls">
+                  {currentUser.role === "superadmin" ? <label>Department<select value={selectedDepartment} onChange={(event) => setAchievementDepartment(event.target.value)}>{availableDepartments.map((department) => <option key={department} value={department}>{department}</option>)}</select></label> : null}
+                  <label>Month<input type="month" value={achievementMonth} onChange={(event) => setAchievementMonth(event.target.value)} /></label>
+                </div>
+              </header>
+
+              <div className="achievement-podium">
+                {leaderboard.slice(0, 3).map(({ user, metrics }, index) => (
+                  <article className={`achievement-winner rank-${index + 1} ${user.id === currentUser.id ? "current-user" : ""}`} key={user.id}>
+                    <span className="achievement-rank">#{index + 1}</span>
+                    <span className="achievement-avatar" style={{ background: identityColor(user.id, currentUser.id) }}>{initials(user.name)}</span>
+                    <div><strong>{user.name}</strong><small>{metrics.status}</small></div>
+                    <b>{metrics.achievementPoints}<small>points</small></b>
+                  </article>
+                ))}
+                {!leaderboard.length ? <div className="achievement-empty"><Trophy aria-hidden="true" size={28} /><strong>No ranked members yet</strong><span>Completed work in {achievementMonth} will appear here.</span></div> : null}
+              </div>
+
+              <div className="achievement-table-wrap">
+                <table className="achievement-table">
+                  <thead><tr><th>Rank</th><th>Team member</th><th>Achievement points</th><th>Productivity index</th><th>Attendance</th><th>Complexity delivered</th><th>Speed vs peers</th><th>Team tasks</th><th>Reopens</th><th>Evaluation</th></tr></thead>
+                  <tbody>{leaderboard.map(({ user, metrics }, index) => (
+                    <tr className={user.id === currentUser.id ? "current-user" : ""} key={`achievement-${user.id}`}>
+                      <td><strong>#{index + 1}</strong></td>
+                      <td><span className="achievement-person"><i style={{ background: identityColor(user.id, currentUser.id) }}>{initials(user.name)}</i><span><strong>{user.name}</strong><small>{user.username}</small></span></span></td>
+                      <td><strong>{metrics.achievementPoints}</strong></td>
+                      <td><span className="achievement-index"><i style={{ width: `${Math.min(100, metrics.productivityIndex)}%` }} /><strong>{metrics.productivityIndex || "—"}</strong></span></td>
+                      <td>{metrics.attendance.expectedDays ? `${Math.round(metrics.attendance.attendanceRate * 100)}%` : "—"}</td>
+                      <td>{metrics.complexityDelivered} pts</td>
+                      <td>{metrics.completed ? `${Math.round(metrics.averageSpeedFactor * 100)}%` : "—"}</td>
+                      <td>{metrics.teamworkTasks}</td>
+                      <td className={metrics.reopenTotal ? "metric-warning" : ""}>{metrics.reopenTotal}</td>
+                      <td><span className={`achievement-status status-${metrics.status.toLowerCase().replace(/\s+/g, "-")}`} title={metrics.evaluationReasons.join(" · ")}>{metrics.status}</span></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+
+              <details className="scoring-guide">
+                <summary>How the fair score is calculated</summary>
+                <div>
+                  <p><strong>Complexity-weighted output:</strong> harder completed tasks start with more points.</p>
+                  <p><strong>Comparable speed:</strong> cycle time is compared with the department median for work of the same complexity. It is capped to prevent gaming.</p>
+                  <p><strong>Quality:</strong> each admin reopen reduces the task score. Reopen history is permanently recorded.</p>
+                  <p><strong>Reliability:</strong> on-time delivery earns a bonus; late delivery receives a measured penalty.</p>
+                  <p><strong>Teamwork:</strong> collaborative tasks earn a bonus, while points are shared fairly across assignees.</p>
+                  <p><strong>Confidence:</strong> low sample sizes are adjusted toward neutral, so one easy task cannot create a misleading top score.</p>
+                </div>
+              </details>
+            </section>
+          );
+        })() : activeView === "productivity" ? (
           <section className="panel page-panel" id="productivity-page">
             <div className="panel-header">
               <div><p>Normal-user delivery intelligence</p><h2>Productivity</h2></div>
@@ -3464,6 +3792,10 @@ export function App() {
                       <span><strong>{metrics.active}</strong>Active now</span>
                       <span><strong>{metrics.activeComplexity}</strong>Active complexity</span>
                       <span><strong>{metrics.completedComplexity}</strong>Completed points</span>
+                      <span><strong>{metrics.performance.productivityIndex || "—"}</strong>Productivity index</span>
+                      <span><strong>{metrics.performance.achievementPoints}</strong>Achievement score</span>
+                      <span><strong>{metrics.performance.reopenTotal}</strong>Admin reopens</span>
+                      <span><strong>{metrics.performance.attendance.expectedDays ? `${Math.round(metrics.performance.attendance.attendanceRate * 100)}%` : "—"}</strong>Attendance KPI</span>
                     </div>
                     <button className="ghost-button" type="button" onClick={() => downloadProductivityReport(user.id, productivityMonth)}>
                       <Download aria-hidden="true" size={16} /> Download {productivityMonth || "All-time"} Excel
@@ -3521,7 +3853,7 @@ export function App() {
 
             <div className="archive-task-list">
               {filteredArchiveTasks.length ? filteredArchiveTasks.map((task) => (
-                <details className="archive-task-card" key={`archive-${task.id}`}>
+                <details className="archive-task-card" id={`task-${task.id}`} key={`archive-${task.id}`}>
                   <summary>
                     <span className="archive-check"><CheckCircle2 aria-hidden="true" size={17} /></span>
                     <span className="archive-task-name"><strong>{task.title}</strong><small>Task #{task.taskCode}{task.projectName ? ` · ${task.projectName}` : ""}</small></span>

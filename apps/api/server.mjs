@@ -123,6 +123,26 @@ function sameDepartment(first, second) {
   return String(first ?? "").trim().toLocaleLowerCase() === String(second ?? "").trim().toLocaleLowerCase();
 }
 
+function riyadhDate() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Riyadh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
+}
+
+async function recordAttendance(userId, countLogin = false) {
+  await db.prepare(`
+    INSERT INTO attendance_records (user_id, work_date) VALUES (?, ?)
+    ON CONFLICT (user_id, work_date) DO UPDATE SET
+      last_login_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE attendance_records.last_login_at END,
+      login_count = attendance_records.login_count + ?
+  `).run(userId, riyadhDate(), countLogin ? 1 : 0, countLogin ? 1 : 0);
+}
+
 function formatDate(value) {
   if (!value) return undefined;
   return new Date(`${value.replace(" ", "T")}Z`).toLocaleString("en-GB", {
@@ -165,6 +185,7 @@ async function todosFor(userId) {
 }
 
 async function serializeTask(row) {
+  const reopenCount = (await db.prepare("SELECT count(*) AS count FROM task_reopen_events WHERE task_id = ?").get(row.id)).count;
   const messages = (await db.prepare(`
     SELECT id, author_id, author_name, body, created_at FROM task_messages
     WHERE task_id = ? ORDER BY created_at ASC
@@ -223,6 +244,7 @@ async function serializeTask(row) {
     projectName: row.project_name ?? undefined,
     taskType: row.task_type ?? "Technical",
     complexity: normalizeComplexity(row.complexity),
+    reopenCount,
     startedAt: isoDateTime(row.started_at),
     dueDate: row.due_date ?? "",
     progress: row.progress,
@@ -233,6 +255,23 @@ async function serializeTask(row) {
     updatedAt: isoDateTime(row.updated_at),
     files,
     messages
+  };
+}
+
+async function serializePerformanceTask(row) {
+  const assigneeIds = await taskAssigneeIds(row.id);
+  const reopenCount = (await db.prepare("SELECT count(*) AS count FROM task_reopen_events WHERE task_id = ?").get(row.id)).count;
+  return {
+    id: row.id,
+    department: row.department,
+    status: row.status,
+    complexity: normalizeComplexity(row.complexity),
+    startedAt: isoDateTime(row.started_at),
+    createdAt: isoDateTime(row.created_at),
+    completedAtIso: isoDateTime(row.completed_at),
+    dueDate: row.due_date ?? "",
+    assigneeIds,
+    reopenCount
   };
 }
 
@@ -417,12 +456,12 @@ async function parseTaskSheet(file) {
   return tasks;
 }
 
-async function notify(userId, kind, title, body, taskId) {
+async function notify(userId, kind, title, body, taskId, channelId) {
   if (!userId) return;
   await db.prepare(`
-    INSERT INTO notifications (id, user_id, kind, title, body, task_id)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(randomUUID(), userId, kind, title, body, taskId ?? null);
+    INSERT INTO notifications (id, user_id, kind, title, body, task_id, channel_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(randomUUID(), userId, kind, title, body, taskId ?? null, channelId ?? null);
 }
 
 async function notifyTaskAudience(task, actorId, title, body) {
@@ -815,7 +854,8 @@ async function buildProductivityReport(user, month = "") {
   const rows = await db.prepare(`
     SELECT DISTINCT tasks.id, tasks.task_code, tasks.title, tasks.department, tasks.priority, tasks.status,
       tasks.due_date, tasks.complexity, tasks.started_at, tasks.progress, tasks.created_at, tasks.updated_at, tasks.completed_at,
-      tasks.task_type, projects.name AS project_name
+      tasks.task_type, projects.name AS project_name,
+      (SELECT count(*) FROM task_reopen_events WHERE task_reopen_events.task_id = tasks.id)::int AS reopen_count
     FROM tasks
     JOIN task_assignees ON task_assignees.task_id = tasks.id
     LEFT JOIN projects ON projects.id = tasks.project_id
@@ -842,6 +882,7 @@ async function buildProductivityReport(user, month = "") {
   const totalComplexity = rows.reduce((sum, task) => sum + normalizeComplexity(task.complexity), 0);
   const activeComplexity = rows.filter((task) => task.status !== "done").reduce((sum, task) => sum + normalizeComplexity(task.complexity), 0);
   const completedComplexity = completed.reduce((sum, task) => sum + normalizeComplexity(task.complexity), 0);
+  const totalReopens = rows.reduce((sum, task) => sum + (task.reopen_count ?? 0), 0);
   const averageProgress = totalComplexity
     ? Math.round(rows.reduce((sum, task) => sum + task.progress * normalizeComplexity(task.complexity), 0) / totalComplexity)
     : 0;
@@ -883,7 +924,9 @@ async function buildProductivityReport(user, month = "") {
     ["On-Time Completion Rate", completed.length ? onTime.length / completed.length : 0],
     ["Total Complexity Points", totalComplexity],
     ["Active Complexity Load", activeComplexity],
-    ["Completed Complexity Points", completedComplexity]
+    ["Completed Complexity Points", completedComplexity],
+    ["Admin Reopen Cycles", totalReopens],
+    ["Average Reopens per Completed Task", completed.length ? totalReopens / completed.length : 0]
   ];
   summary.getCell("A7").value = "Productivity Summary";
   summary.getCell("A7").font = { bold: true, color: { argb: "FF0B456B" }, size: 13 };
@@ -917,7 +960,8 @@ async function buildProductivityReport(user, month = "") {
     { header: "Due", key: "due", width: 14 },
     { header: "Completed", key: "completed", width: 18 },
     { header: "On Time", key: "onTime", width: 12 },
-    { header: "Cycle Time (days)", key: "cycleTime", width: 18 }
+    { header: "Cycle Time (days)", key: "cycleTime", width: 18 },
+    { header: "Admin Reopens", key: "reopens", width: 15 }
   ];
   tasks.getRow(1).eachCell((cell) => {
     cell.fill = titleFill;
@@ -943,7 +987,8 @@ async function buildProductivityReport(user, month = "") {
       onTime: completedDate && task.due_date ? (task.completed_at.slice(0, 10) <= task.due_date ? "Yes" : "No") : "",
       cycleTime: completedDate
         ? (completedDate.getTime() - new Date(`${(task.started_at ?? task.created_at).replace(" ", "T")}Z`).getTime()) / 86_400_000
-        : null
+        : null,
+      reopens: task.reopen_count ?? 0
     });
   }
   tasks.getColumn("progress").numFmt = "0%";
@@ -952,7 +997,7 @@ async function buildProductivityReport(user, month = "") {
   tasks.getColumn("due").numFmt = "yyyy-mm-dd";
   tasks.getColumn("completed").numFmt = "yyyy-mm-dd hh:mm";
   tasks.getColumn("cycleTime").numFmt = "0.0";
-  tasks.autoFilter = { from: "A1", to: "O1" };
+  tasks.autoFilter = { from: "A1", to: "P1" };
   tasks.eachRow((row, rowNumber) => {
     if (rowNumber > 1 && rowNumber % 2 === 0) row.eachCell((cell) => { cell.fill = paleFill; });
   });
@@ -1080,11 +1125,13 @@ const server = createServer(async (request, response) => {
       }
       const token = randomBytes(32).toString("hex");
       await db.prepare("INSERT INTO sessions (token, user_id, last_active_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(token, row.id);
+      await recordAttendance(row.id, true);
       return send(response, 200, { token, user: publicUser(row) });
     }
 
     const actor = await authenticatedUser(request);
     if (!actor) return send(response, 401, { message: "Please log in again." });
+    await recordAttendance(actor.id);
 
     if (request.method === "POST" && path === "/api/auth/fork") {
       const token = randomBytes(32).toString("hex");
@@ -1157,8 +1204,28 @@ const server = createServer(async (request, response) => {
         if (await canView(actor, task)) visibleTaskRows.push(task);
       }
       const tasks = await Promise.all(visibleTaskRows.map(serializeTask));
+      const performanceRows = actor.role === "superadmin"
+        ? taskRows
+        : taskRows.filter((task) => sameDepartment(task.department, actor.department));
+      const performanceTasks = await Promise.all(performanceRows.map(serializePerformanceTask));
+      const attendanceUsers = actor.role === "superadmin"
+        ? await db.prepare("SELECT id, created_at FROM users WHERE role = 'user' ORDER BY name").all()
+        : await db.prepare("SELECT id, created_at FROM users WHERE role = 'user' AND lower(trim(department)) = lower(trim(?)) ORDER BY name").all(actor.department);
+      const attendanceProfiles = await Promise.all(attendanceUsers.map(async (user) => ({
+        userId: user.id,
+        employmentStart: user.created_at.slice(0, 10),
+        records: (await db.prepare(`
+          SELECT work_date, first_login_at, last_login_at, login_count
+          FROM attendance_records WHERE user_id = ? ORDER BY work_date DESC
+        `).all(user.id)).map((record) => ({
+          workDate: record.work_date,
+          firstLoginAt: isoDateTime(record.first_login_at),
+          lastLoginAt: isoDateTime(record.last_login_at),
+          loginCount: record.login_count
+        }))
+      })));
       const notifications = (await db.prepare(`
-        SELECT id, kind, title, body, task_id, is_read, created_at
+        SELECT id, kind, title, body, task_id, channel_id, is_read, created_at
         FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 30
       `).all(actor.id)).map((item) => ({
         id: item.id,
@@ -1166,6 +1233,7 @@ const server = createServer(async (request, response) => {
         title: item.title,
         body: item.body,
         taskId: item.task_id ?? undefined,
+        channelId: item.channel_id ?? undefined,
         isRead: Boolean(item.is_read),
         createdAt: formatDate(item.created_at)
       }));
@@ -1174,6 +1242,8 @@ const server = createServer(async (request, response) => {
         departments,
         users,
         tasks,
+        performanceTasks,
+        attendanceProfiles,
         projects: await projectsFor(actor),
         notifications,
         todos: await todosFor(actor.id),
@@ -1585,6 +1655,8 @@ const server = createServer(async (request, response) => {
         const comment = String(body.comment ?? "").trim();
         if (!canManage(actor, task) || task.status !== "under_review" || !comment) return send(response, 403, { message: "A review comment is required." });
         await db.prepare("UPDATE tasks SET status = 'in_progress', progress = MIN(progress, 90), review_comment = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(comment, task.id);
+        await db.prepare("INSERT INTO task_reopen_events (id, task_id, reviewer_id, comment) VALUES (?, ?, ?, ?)")
+          .run(randomUUID(), task.id, actor.id, comment);
         await db.prepare("DELETE FROM task_worker_approvals WHERE task_id = ?").run(task.id);
         for (const userId of assignedUserIds) await notify(userId, "review", "Task reopened", `${actor.name}: ${comment}`, task.id);
       }
@@ -1748,15 +1820,21 @@ const server = createServer(async (request, response) => {
         throw error;
       }
       const mentionedNames = new Set([...messageBody.matchAll(/@\[([^\]]+)\]/g)].map((match) => match[1].trim().toLocaleLowerCase()));
-      if (mentionedNames.size) {
-        const possibleMentions = await db.prepare("SELECT * FROM users WHERE id != ? ORDER BY name").all(actor.id);
-        for (const mentionedUser of possibleMentions) {
-          if (!mentionedNames.has(mentionedUser.name.trim().toLocaleLowerCase())) continue;
-          try {
-            await resolveChatChannel(mentionedUser, channelId);
-            await notify(mentionedUser.id, "mention", `${actor.name} mentioned you`, messageBody.slice(0, 240));
-          } catch { /* The mentioned user cannot access this conversation. */ }
-        }
+      const possibleRecipients = await db.prepare("SELECT * FROM users WHERE id != ? ORDER BY name").all(actor.id);
+      for (const recipient of possibleRecipients) {
+        try {
+          await resolveChatChannel(recipient, channelId);
+          const wasMentioned = mentionedNames.has(recipient.name.trim().toLocaleLowerCase());
+          const preview = messageBody || `${incomingFiles.length} attachment${incomingFiles.length === 1 ? "" : "s"}`;
+          await notify(
+            recipient.id,
+            wasMentioned ? "mention" : "chat",
+            wasMentioned ? `${actor.name} mentioned you` : `New message from ${actor.name}`,
+            preview.slice(0, 240),
+            null,
+            channelId
+          );
+        } catch { /* This user is not a participant in the conversation. */ }
       }
       await touchSession(request);
       return send(response, 201, { ok: true });

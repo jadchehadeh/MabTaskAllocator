@@ -26,6 +26,15 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_active_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
 );
 
+CREATE TABLE IF NOT EXISTS attendance_records (
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  work_date text NOT NULL,
+  first_login_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+  last_login_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+  login_count integer NOT NULL DEFAULT 1,
+  PRIMARY KEY (user_id, work_date)
+);
+
 CREATE TABLE IF NOT EXISTS projects (
   id text PRIMARY KEY,
   name text NOT NULL,
@@ -93,6 +102,14 @@ CREATE TABLE IF NOT EXISTS task_worker_approvals (
   PRIMARY KEY (task_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS task_reopen_events (
+  id text PRIMARY KEY,
+  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  reviewer_id text REFERENCES users(id) ON DELETE SET NULL,
+  comment text NOT NULL,
+  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+);
+
 CREATE TABLE IF NOT EXISTS task_code_sequences (
   prefix text PRIMARY KEY,
   next_number integer NOT NULL
@@ -125,9 +142,12 @@ CREATE TABLE IF NOT EXISTS notifications (
   title text NOT NULL,
   body text NOT NULL,
   task_id text REFERENCES tasks(id) ON DELETE CASCADE,
+  channel_id text,
   is_read integer NOT NULL DEFAULT 0,
   created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
 );
+
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS channel_id text;
 
 CREATE TABLE IF NOT EXISTS todos (
   id text PRIMARY KEY,
@@ -199,12 +219,14 @@ CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_code ON tasks(task_code);
 CREATE INDEX IF NOT EXISTS idx_task_assignees_user ON task_assignees(user_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_task_reopen_events_task ON task_reopen_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_files(task_id, uploaded_at);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_todos_user ON todos(user_id, is_completed, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_active_at);
+CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance_records(user_id, work_date DESC);
 CREATE INDEX IF NOT EXISTS idx_chat_groups_department ON chat_groups(department, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_groups_task ON chat_groups(task_id) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_messages_department ON chat_messages(department, created_at DESC);
