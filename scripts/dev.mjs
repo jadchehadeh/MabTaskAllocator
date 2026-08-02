@@ -2,8 +2,8 @@ import { spawn } from "node:child_process";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const children = [
-  spawn(npm, ["run", "dev", "-w", "@mab/api"], { stdio: "inherit" }),
-  spawn(npm, ["run", "dev", "-w", "@mab/web"], { stdio: "inherit" })
+  spawn(npm, ["run", "dev", "-w", "@mab/api"], { stdio: "inherit", shell: process.platform === "win32" }),
+  spawn(npm, ["run", "dev", "-w", "@mab/web"], { stdio: "inherit", shell: process.platform === "win32" })
 ];
 
 function stop() {

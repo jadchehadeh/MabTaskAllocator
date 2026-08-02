@@ -16,6 +16,7 @@ import {
   Hand,
   KeyRound,
   ListTodo,
+  Languages,
   Lock,
   LogOut,
   MessageSquare,
@@ -37,8 +38,10 @@ import {
 } from "lucide-react";
 import type { AppUser, DepartmentName, TaskPriority, TaskStatus, TaskType, UserRole } from "@mab/shared";
 import { api, getLastActivity, hasSession, inactivityLimitMs, markActivity } from "./api";
-import type { AppNotification, AttendanceProfile, ChatChannel, ChatMessage, ChatMessageFile, ManagedTask, PerformanceTask, Project, TodoItem } from "./api";
+import type { AppNotification, AttendanceProfile, AuditLog, ChatChannel, ChatMessage, ChatMessageFile, ManagedTask, OperationalIntelligence, PerformanceTask, Project, TodoItem } from "./api";
 import { StatCard } from "./components/StatCard";
+import { useSiteTranslation } from "./i18n";
+import type { SiteLanguage } from "./i18n";
 
 const mabLogo = "/mab-logo.jpeg";
 
@@ -75,6 +78,23 @@ const statusLabels: Record<TaskStatus, string> = {
   done: "Done"
 };
 
+const taskEventLabels: Record<string, string> = {
+  created: "Task created",
+  updated: "Task updated",
+  claim_requested: "Task requested",
+  claim_approved: "Claim approved · task started",
+  claim_rejected: "Claim rejected",
+  worker_finished: "Work submitted",
+  approved: "Manager approved · task completed",
+  reopened: "Task reopened",
+  viewed: "Task opened",
+  commented: "Comment added",
+  comment_edited: "Comment edited",
+  comment_deleted: "Comment deleted",
+  files_uploaded: "Files uploaded",
+  reassigned: "Task reassigned"
+};
+
 const roleLabels: Record<UserRole, string> = {
   superadmin: "Super Admin",
   admin: "Admin",
@@ -92,6 +112,8 @@ const viewTitles = {
   productivity: "Productivity",
   achievements: "Achievements",
   attendance: "Attendance",
+  intelligence: "Work Intelligence",
+  audit: "Admin Audit",
   chat: "Department Chat"
 } as const;
 
@@ -321,11 +343,13 @@ function ChatAttachment({ file }: { file: ChatMessageFile }) {
 interface LoginPageProps {
   darkMode: boolean;
   error: string;
+  language: SiteLanguage;
   onLogin: (username: string, password: string) => void;
+  onToggleLanguage: () => void;
   onToggleTheme: () => void;
 }
 
-function LoginPage({ darkMode, error, onLogin, onToggleTheme }: LoginPageProps) {
+function LoginPage({ darkMode, error, language, onLogin, onToggleLanguage, onToggleTheme }: LoginPageProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
@@ -345,6 +369,10 @@ function LoginPage({ darkMode, error, onLogin, onToggleTheme }: LoginPageProps) 
       >
         {darkMode ? <Sun aria-hidden="true" size={18} /> : <Moon aria-hidden="true" size={18} />}
         {darkMode ? "Light mode" : "Dark mode"}
+      </button>
+      <button className="theme-toggle login-language-toggle" onClick={onToggleLanguage} type="button" aria-label="Change language">
+        <Languages aria-hidden="true" size={18} />
+        {language === "en" ? "العربية" : "English"}
       </button>
       <section className="login-hero" aria-label="MAB Task Allocator login">
         <div className="cosmic-panel">
@@ -413,6 +441,8 @@ function LoginPage({ darkMode, error, onLogin, onToggleTheme }: LoginPageProps) 
 }
 
 export function App() {
+  const [language, setLanguage] = useState<SiteLanguage>(() => window.localStorage.getItem("mab-task-allocator.language") === "ar" ? "ar" : "en");
+  useSiteTranslation(language);
   const [themePreference, setThemePreference] = useState(() => ({
     darkMode: storedDarkMode("login"),
     ownerId: "login"
@@ -422,6 +452,8 @@ export function App() {
   const [tasks, setTasks] = useState<ManagedTask[]>([]);
   const [performanceTasks, setPerformanceTasks] = useState<PerformanceTask[]>([]);
   const [attendanceProfiles, setAttendanceProfiles] = useState<AttendanceProfile[]>([]);
+  const [intelligence, setIntelligence] = useState<OperationalIntelligence>({ generatedAt: "", portfolio: { activeTasks: 0, highRiskTasks: 0, overloadedUsers: 0, unassignedTasks: 0, healthScore: 100 }, taskInsights: [], workforceInsights: [] });
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
@@ -451,7 +483,7 @@ export function App() {
     { role: "assistant", text: "Hello! I’m the MAB AI assistant. Ask me to help organize work, draft a task update, summarize an issue, or plan your day." }
   ]);
   const [activeView, setActiveView] = useState<
-    "dashboard" | "projects" | "tasks" | "todos" | "finished" | "people" | "team" | "productivity" | "achievements" | "attendance" | "chat"
+    "dashboard" | "projects" | "tasks" | "todos" | "finished" | "people" | "team" | "productivity" | "achievements" | "attendance" | "intelligence" | "audit" | "chat"
   >("dashboard");
   const [activeTaskSection, setActiveTaskSection] = useState<"assigned" | "free">("assigned");
   const [managerTaskSection, setManagerTaskSection] = useState<"all" | "review" | "free">("all");
@@ -521,12 +553,21 @@ export function App() {
       ownerId: themeOwnerId
     }));
   }
+
+  function toggleLanguage() {
+    setLanguage((current) => {
+      const next = current === "en" ? "ar" : "en";
+      window.localStorage.setItem("mab-task-allocator.language", next);
+      return next;
+    });
+  }
   const [teamDepartment, setTeamDepartment] = useState("");
   const [teamMonth, setTeamMonth] = useState(new Date().toISOString().slice(0, 7));
   const [productivityMonth, setProductivityMonth] = useState("");
   const [achievementMonth, setAchievementMonth] = useState(new Date().toISOString().slice(0, 7));
   const [achievementDepartment, setAchievementDepartment] = useState("");
   const [attendanceMonth, setAttendanceMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [auditQuery, setAuditQuery] = useState("");
   const [todoDraft, setTodoDraft] = useState({ title: "", taskId: "" });
   const [todoFilter, setTodoFilter] = useState<"all" | "open" | "completed">("all");
   const [todoMessage, setTodoMessage] = useState("");
@@ -578,17 +619,43 @@ export function App() {
   async function refreshData(silent = false) {
     try {
       const data = await api.bootstrap();
+      const safeTasks = (data.tasks ?? []).map((task) => ({
+        ...task,
+        assigneeIds: task.assigneeIds ?? [],
+        candidateNames: task.candidateNames ?? [],
+        workerApprovals: task.workerApprovals ?? [],
+        pendingApprovalNames: task.pendingApprovalNames ?? [],
+        files: task.files ?? [],
+        messages: task.messages ?? [],
+        events: task.events ?? [],
+        reopenCount: task.reopenCount ?? 0
+      }));
+      const safePerformanceTasks = (data.performanceTasks ?? []).map((task) => ({
+        ...task,
+        assigneeIds: task.assigneeIds ?? [],
+        reopenCount: task.reopenCount ?? 0
+      }));
+      const safeAttendanceProfiles = (data.attendanceProfiles ?? []).map((profile) => ({
+        ...profile,
+        records: profile.records ?? []
+      }));
+      const safeChatMessages = (data.chatMessages ?? []).map((message) => ({
+        ...message,
+        files: message.files ?? []
+      }));
       setCurrentUser(data.currentUser);
       setDepartments(data.departments?.length ? data.departments : defaultDepartments);
-      setUsers(data.users);
-      setTasks(data.tasks);
-      setPerformanceTasks(data.performanceTasks ?? []);
-      setAttendanceProfiles(data.attendanceProfiles ?? []);
-      setTodos(data.todos);
-      setProjects(data.projects);
-      setNotifications(data.notifications);
-      setChatChannels(data.chatChannels);
-      setChatMessages(data.chatMessages);
+      setUsers(data.users ?? []);
+      setTasks(safeTasks);
+      setPerformanceTasks(safePerformanceTasks);
+      setAttendanceProfiles(safeAttendanceProfiles);
+      setIntelligence(data.intelligence ?? { generatedAt: "", portfolio: { activeTasks: safeTasks.filter((task) => task.status !== "done").length, highRiskTasks: 0, overloadedUsers: 0, unassignedTasks: 0, healthScore: 100 }, taskInsights: [], workforceInsights: [] });
+      setAuditLogs(data.auditLogs ?? []);
+      setTodos(data.todos ?? []);
+      setProjects((data.projects ?? []).map((project) => ({ ...project, members: project.members ?? [] })));
+      setNotifications(data.notifications ?? []);
+      setChatChannels(data.chatChannels ?? []);
+      setChatMessages(safeChatMessages);
       setLoginError("");
     } catch (error) {
       if (!silent) setLoginError(error instanceof Error ? error.message : "Could not connect to the server.");
@@ -617,9 +684,17 @@ export function App() {
 
   useEffect(() => {
     if (!currentUser) return;
-    const interval = window.setInterval(() => void refreshData(true), 4000);
+    let refreshing = false;
+    const refreshVisibleWorkspace = async () => {
+      if (document.visibilityState !== "visible" || refreshing) return;
+      refreshing = true;
+      try { await refreshData(true); } finally { refreshing = false; }
+    };
+    const interval = window.setInterval(() => void refreshVisibleWorkspace(), 12_000);
+    document.addEventListener("visibilitychange", refreshVisibleWorkspace);
     return () => {
       window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshVisibleWorkspace);
     };
   }, [currentUser?.id]);
 
@@ -1053,6 +1128,7 @@ export function App() {
       setTasks([]);
       setPerformanceTasks([]);
       setAttendanceProfiles([]);
+      setIntelligence({ generatedAt: "", portfolio: { activeTasks: 0, highRiskTasks: 0, overloadedUsers: 0, unassignedTasks: 0, healthScore: 100 }, taskInsights: [], workforceInsights: [] });
       setTodos([]);
       setProjects([]);
       setNotifications([]);
@@ -1070,6 +1146,7 @@ export function App() {
       setTasks([]);
       setPerformanceTasks([]);
       setAttendanceProfiles([]);
+      setIntelligence({ generatedAt: "", portfolio: { activeTasks: 0, highRiskTasks: 0, overloadedUsers: 0, unassignedTasks: 0, healthScore: 100 }, taskInsights: [], workforceInsights: [] });
       setTodos([]);
       setProjects([]);
       setNotifications([]);
@@ -1081,10 +1158,11 @@ export function App() {
 
   async function openNotifications() {
     setShowNotifications((visible) => !visible);
-    if (unreadNotifications) {
-      await api.markNotificationsRead();
-      setNotifications((items) => items.map((item) => ({ ...item, isRead: true })));
-    }
+  }
+
+  async function markAllNotificationsRead() {
+    await api.markNotificationsRead();
+    setNotifications((items) => items.map((item) => ({ ...item, isRead: true })));
   }
 
   function selectChatChannel(channelId: string) {
@@ -1117,6 +1195,10 @@ export function App() {
   }
 
   function openNotificationTarget(notification: AppNotification) {
+    if (!notification.isRead) {
+      void api.markNotificationRead(notification.id).catch(() => undefined);
+      setNotifications((items) => items.map((item) => item.id === notification.id ? { ...item, isRead: true } : item));
+    }
     setShowNotifications(false);
     if (notification.channelId) {
       void openDepartmentChat(notification.channelId);
@@ -1563,7 +1645,7 @@ export function App() {
   }
 
   async function reopenTask(task: ManagedTask) {
-    if (!currentUser || !canManageTask(task) || task.status !== "under_review") return;
+    if (!currentUser || !canManageTask(task) || !["under_review", "done"].includes(task.status)) return;
 
     const comment = reviewDrafts[task.id]?.trim();
     if (!comment) {
@@ -1882,12 +1964,14 @@ export function App() {
       !task.workerApprovals.some((approval) => approval.id === currentUser.id) &&
       task.status !== "done" &&
       task.status !== "under_review";
-    const canReviewTask = canEditTask && task.status === "under_review";
+    const canReviewTask = canDeleteTask && task.status === "under_review";
+    const canReopenCompletedTask = canDeleteTask && task.status === "done";
     const taskEditProject = projects.find((project) => project.id === taskEditDraft?.projectId);
     const taskAssignableUsers = assignableUsers.filter((user) => taskEditProject
       ? taskEditProject.members.some((member) => member.id === user.id)
       : sameDepartment(user.department, taskEditDraft?.department ?? task.department));
     const overdue = isTaskOverdue(task);
+    const taskInsight = intelligence.taskInsights.find((insight) => insight.taskId === task.id);
 
     return (
       <article className={`task-card task-card-priority-${task.priority}`} id={`task-${task.id}`} key={`${view}-${task.id}`}>
@@ -2109,6 +2193,7 @@ export function App() {
                 {overdue ? (
                   <span className="overdue-pill"><AlertTriangle aria-hidden="true" size={12} />Overdue</span>
                 ) : null}
+                {taskInsight && taskInsight.delayRisk >= 50 ? <span className={`risk-pill risk-${taskInsight.riskLevel}`} title={taskInsight.reasons.join(" · ")}><Sparkles aria-hidden="true" size={12} />{taskInsight.delayRisk}% delay risk</span> : null}
               </div>
               <h3 className="task-card-title">{task.title}</h3>
               {task.reviewComment ? <p className="review-note">Review: {task.reviewComment}</p> : null}
@@ -2208,27 +2293,41 @@ export function App() {
           </div>
         ) : null}
 
-        {canReviewTask ? (
+        {task.events.length ? (
+          <details className="task-workflow">
+            <summary><span><RotateCcw aria-hidden="true" size={15} />Workflow & updates</span><b>{task.events.length} events</b></summary>
+            <div className="task-workflow-list">
+              {[...task.events].reverse().map((event) => (
+                <article className={`task-workflow-event event-${event.type}`} key={event.id}>
+                  <span className="workflow-dot"><CheckCircle2 aria-hidden="true" size={13} /></span>
+                  <div><strong>{taskEventLabels[event.type] ?? event.type}</strong><p>{event.details}</p><small>{event.actorName} · {event.createdAt}</small></div>
+                </article>
+              ))}
+            </div>
+          </details>
+        ) : null}
+
+        {canReviewTask || canReopenCompletedTask ? (
           <div className="review-box">
             <input
               onChange={(event) =>
                 setReviewDrafts((drafts) => ({ ...drafts, [task.id]: event.target.value }))
               }
-              placeholder="Add comments if this needs changes"
+              placeholder={canReopenCompletedTask ? "Explain why this completed task must be reopened" : "Add comments if this needs changes"}
               value={reviewDrafts[task.id] ?? ""}
             />
-            <button type="button" className="task-action-button" onClick={() => approveTask(task)}>
+            {canReviewTask ? <button type="button" className="task-action-button" onClick={() => approveTask(task)}>
               <CheckCircle2 aria-hidden="true" size={16} />
               Approve
-            </button>
+            </button> : null}
             <button type="button" className="task-action-button secondary" onClick={() => reopenTask(task)}>
               <RotateCcw aria-hidden="true" size={16} />
-              Reopen
+              {canReopenCompletedTask ? "Reopen Completed Task" : "Reopen"}
             </button>
           </div>
         ) : null}
 
-        <details className="task-collaboration-details">
+        <details className="task-collaboration-details" onToggle={(event) => { if (event.currentTarget.open) void api.trackTaskView(task.id).catch(() => undefined); }}>
           <summary><span><MessageSquare aria-hidden="true" size={15} />Discussion <b>{task.messages.length}</b></span><span><Paperclip aria-hidden="true" size={15} />Documents <b>{task.files.length}</b></span><small>Open workspace</small></summary>
         <div className="task-collab">
           <div className="task-thread">
@@ -2356,7 +2455,9 @@ export function App() {
       <LoginPage
         darkMode={darkMode}
         error={loginError}
+        language={language}
         onLogin={handleLogin}
+        onToggleLanguage={toggleLanguage}
         onToggleTheme={toggleTheme}
       />
     );
@@ -2799,6 +2900,15 @@ export function App() {
           </button>
           <button
             type="button"
+            className={`sidebar-nav-button ${activeView === "intelligence" ? "active" : ""}`}
+            onClick={() => setActiveView("intelligence")}
+          >
+            <Sparkles aria-hidden="true" size={17} />
+            Work Intelligence
+            {intelligence.portfolio.highRiskTasks ? <span>{intelligence.portfolio.highRiskTasks}</span> : null}
+          </button>
+          <button
+            type="button"
             className={`sidebar-nav-button ${activeView === "people" ? "active" : ""}`}
             onClick={() => setActiveView("people")}
           >
@@ -2816,14 +2926,10 @@ export function App() {
             <span>{teamCandidates.length}</span>
           </button>
           {canManagePeople ? (
-            <button
-              type="button"
-              className={`sidebar-nav-button ${activeView === "productivity" ? "active" : ""}`}
-              onClick={() => setActiveView("productivity")}
-            >
-              <FileSpreadsheet aria-hidden="true" size={17} />
-              Productivity
-            </button>
+            <>
+              <button type="button" className={`sidebar-nav-button ${activeView === "productivity" ? "active" : ""}`} onClick={() => setActiveView("productivity")}><FileSpreadsheet aria-hidden="true" size={17} />Productivity</button>
+              <button type="button" className={`sidebar-nav-button ${activeView === "audit" ? "active" : ""}`} onClick={() => setActiveView("audit")}><ShieldCheck aria-hidden="true" size={17} />Admin Audit</button>
+            </>
           ) : null}
         </nav>
         <div className="sidebar-user">
@@ -2864,6 +2970,10 @@ export function App() {
               {darkMode ? <Sun aria-hidden="true" size={18} /> : <Moon aria-hidden="true" size={18} />}
               <span>{darkMode ? "Light mode" : "Dark mode"}</span>
             </button>
+            <button className="theme-toggle language-toggle" onClick={toggleLanguage} type="button" aria-label="Change language">
+              <Languages aria-hidden="true" size={18} />
+              <span>{language === "en" ? "العربية" : "English"}</span>
+            </button>
             <div className="notification-center">
               <button
                 type="button"
@@ -2880,6 +2990,7 @@ export function App() {
                   <div className="notification-heading">
                     <strong>Notifications</strong>
                     <span>{notifications.length} recent</span>
+                    {unreadNotifications ? <button type="button" onClick={() => void markAllNotificationsRead()}>Mark all read</button> : null}
                   </div>
                   <div className="notification-list">
                     {notifications.length ? notifications.map((notification) => (
@@ -3669,7 +3780,41 @@ export function App() {
                 })}
             </div>
           </section>
-        ) : activeView === "attendance" ? (() => {
+        ) : activeView === "audit" && canManagePeople ? (() => {
+          const normalizedQuery = auditQuery.trim().toLocaleLowerCase();
+          const visibleAuditLogs = auditLogs.filter((entry) => !normalizedQuery || [entry.actorName, entry.action, entry.entityType, entry.department, entry.details].some((value) => String(value ?? "").toLocaleLowerCase().includes(normalizedQuery)));
+          return <section className="panel audit-page"><header className="audit-header"><div><span><ShieldCheck aria-hidden="true" size={22} /></span><div><p>Immutable management trail</p><h2>Admin Audit</h2><small>User, project, department, and destructive task operations are retained independently from entity deletion.</small></div></div><label><Search aria-hidden="true" size={16} /><input value={auditQuery} onChange={(event) => setAuditQuery(event.target.value)} placeholder="Search actor, action, entity, or department" /></label></header><div className="audit-summary"><span><strong>{auditLogs.length}</strong>Recent events</span><span><strong>{new Set(auditLogs.map((entry) => entry.actorName)).size}</strong>Active administrators</span><span><strong>{auditLogs.filter((entry) => entry.action === "deleted").length}</strong>Deletions recorded</span></div><div className="audit-table-wrap"><table className="audit-table"><thead><tr><th>Time</th><th>Administrator</th><th>Action</th><th>Entity</th><th>Department</th><th>Details</th></tr></thead><tbody>{visibleAuditLogs.length ? visibleAuditLogs.map((entry) => <tr key={entry.id}><td>{entry.createdAt}</td><td><strong>{entry.actorName}</strong></td><td><span className={`audit-action action-${entry.action}`}>{entry.action}</span></td><td>{entry.entityType}</td><td>{entry.department || "—"}</td><td>{entry.details}</td></tr>) : <tr><td colSpan={6}>No audit events match this search.</td></tr>}</tbody></table></div></section>;
+        })() : activeView === "intelligence" ? (() => {
+          const visibleTaskInsights = intelligence.taskInsights
+            .map((insight) => ({ insight, task: tasks.find((task) => task.id === insight.taskId) }))
+            .filter((item): item is { insight: OperationalIntelligence["taskInsights"][number]; task: ManagedTask } => Boolean(item.task))
+            .sort((first, second) => second.insight.delayRisk - first.insight.delayRisk);
+          const visibleWorkforce = intelligence.workforceInsights
+            .map((insight) => ({ insight, user: users.find((user) => user.id === insight.userId) }))
+            .filter((item) => item.user && (currentUser.role !== "user" || item.user.id === currentUser.id))
+            .sort((first, second) => second.insight.burnoutRisk - first.insight.burnoutRisk);
+          return <section className="panel intelligence-page">
+            <header className="intelligence-hero"><div><span><Sparkles aria-hidden="true" size={23} /></span><div><p>Explainable operational analytics</p><h2>Work Intelligence</h2><small>Risk signals support manager decisions; they never modify assignments automatically.</small></div></div><strong>{intelligence.portfolio.healthScore}<small>Portfolio health</small></strong></header>
+            <div className="intelligence-summary">
+              <span><strong>{intelligence.portfolio.activeTasks}</strong>Active work</span>
+              <span className={intelligence.portfolio.highRiskTasks ? "warning" : ""}><strong>{intelligence.portfolio.highRiskTasks}</strong>High-risk tasks</span>
+              <span className={intelligence.portfolio.overloadedUsers ? "warning" : ""}><strong>{intelligence.portfolio.overloadedUsers}</strong>Overloaded people</span>
+              <span><strong>{intelligence.portfolio.unassignedTasks}</strong>Unassigned</span>
+            </div>
+            <div className="intelligence-grid">
+              <section><div className="panel-header"><div><p>Predictive delivery control</p><h3>Task risk radar</h3></div></div><div className="intelligence-list">
+                {visibleTaskInsights.length ? visibleTaskInsights.map(({ insight, task }) => {
+                  const suggested = users.find((user) => user.id === insight.suggestedAssigneeId);
+                  return <article key={task.id}><span className={`risk-score risk-${insight.riskLevel}`}>{insight.delayRisk}</span><div><strong>#{task.taskCode} · {task.title}</strong><small>{insight.reasons.join(" · ")}</small><span>Smart priority: <b>{insight.smartPriority}</b>{suggested ? ` · Lowest-load candidate: ${suggested.name}` : ""}</span></div><button className="ghost-button" onClick={() => { setActiveView("tasks"); window.setTimeout(() => document.getElementById(`task-${task.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 100); }} type="button">Open</button></article>;
+                }) : <p className="empty-state">No visible task risks.</p>}
+              </div></section>
+              <section><div className="panel-header"><div><p>Capacity protection</p><h3>Burnout & workload</h3></div></div><div className="intelligence-list workforce-list">
+                {visibleWorkforce.length ? visibleWorkforce.map(({ insight, user }) => <article key={insight.userId}><span className={`risk-score risk-${insight.level}`}>{insight.burnoutRisk}</span><div><strong>{user?.name}</strong><small>{insight.reasons.join(" · ")}</small><span>{insight.activeTasks} active · {insight.complexityLoad} complexity points</span></div></article>) : <p className="empty-state">No workforce risk data.</p>}
+              </div></section>
+            </div>
+            <details className="intelligence-method"><summary>How these signals are calculated</summary><p><strong>Delay risk</strong> combines deadline proximity, progress versus comparable completed work, assignee load, blocked state, and reopen cycles. <strong>Smart priority</strong> combines declared urgency, deadline pressure, complexity, blocked/review state, and quality history. <strong>Burnout risk</strong> combines active complexity, concurrent tasks, urgent and overdue work, blockers, and rework. Scores are capped, explainable, and advisory.</p></details>
+          </section>;
+        })() : activeView === "attendance" ? (() => {
           const candidates = currentUser.role === "user"
             ? users.filter((user) => user.id === currentUser.id)
             : productivityCandidates;
@@ -3870,7 +4015,9 @@ export function App() {
                     <div><span>Started</span><strong>{task.startedAt ? new Date(task.startedAt).toLocaleDateString("en-GB") : "Not recorded"}</strong></div>
                   </div>
                   {task.reviewComment ? <p className="archive-review-note"><strong>Final review</strong>{task.reviewComment}</p> : null}
+                  {task.events.length ? <div className="archive-workflow"><strong>Workflow history</strong>{[...task.events].reverse().map((event) => <span key={`archive-event-${event.id}`}><i /><span><b>{taskEventLabels[event.type] ?? event.type}</b><small>{event.actorName} · {event.createdAt}</small></span></span>)}</div> : null}
                   {task.files.length ? <div className="archive-files">{task.files.map((file) => <button className="file-download" key={file.id} onClick={() => downloadTaskFile(file)} type="button"><span><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span><Download aria-hidden="true" size={15} /></button>)}</div> : null}
+                  {canManageTask(task) ? <div className="archive-reopen"><input value={reviewDrafts[task.id] ?? ""} onChange={(event) => setReviewDrafts((drafts) => ({ ...drafts, [task.id]: event.target.value }))} placeholder="Explain why this completed task must be reopened" /><button className="task-action-button secondary" onClick={() => reopenTask(task)} type="button"><RotateCcw aria-hidden="true" size={15} />Reopen Completed Task</button></div> : null}
                 </details>
               )) : <div className="archive-empty"><Search aria-hidden="true" size={24} /><strong>No finished tasks found</strong><span>Try a shorter task ID or clear the additional filters.</span></div>}
             </div>

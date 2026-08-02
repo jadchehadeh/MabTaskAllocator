@@ -110,6 +110,34 @@ CREATE TABLE IF NOT EXISTS task_reopen_events (
   created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
 );
 
+CREATE TABLE IF NOT EXISTS task_events (
+  id text PRIMARY KEY,
+  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  actor_id text REFERENCES users(id) ON DELETE SET NULL,
+  actor_name text NOT NULL,
+  event_type text NOT NULL,
+  details text NOT NULL DEFAULT '',
+  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+);
+
+INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details, created_at)
+SELECT 'created-' || tasks.id, tasks.id, tasks.created_by_id, COALESCE(users.name, 'System'), 'created', 'Task created', tasks.created_at
+FROM tasks LEFT JOIN users ON users.id = tasks.created_by_id
+WHERE NOT EXISTS (SELECT 1 FROM task_events existing WHERE existing.task_id = tasks.id AND existing.event_type = 'created')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details, created_at)
+SELECT 'completed-' || tasks.id, tasks.id, NULL, 'Manager', 'approved', 'Task approved and completed', tasks.completed_at
+FROM tasks WHERE tasks.status = 'done' AND tasks.completed_at IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM task_events existing WHERE existing.task_id = tasks.id AND existing.event_type = 'approved')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details, created_at)
+SELECT 'reopen-' || task_reopen_events.id, task_reopen_events.task_id, task_reopen_events.reviewer_id,
+  COALESCE(users.name, 'Manager'), 'reopened', task_reopen_events.comment, task_reopen_events.created_at
+FROM task_reopen_events LEFT JOIN users ON users.id = task_reopen_events.reviewer_id
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS task_code_sequences (
   prefix text PRIMARY KEY,
   next_number integer NOT NULL
@@ -143,11 +171,25 @@ CREATE TABLE IF NOT EXISTS notifications (
   body text NOT NULL,
   task_id text REFERENCES tasks(id) ON DELETE CASCADE,
   channel_id text,
+  dedupe_key text,
   is_read integer NOT NULL DEFAULT 0,
   created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
 );
 
+CREATE TABLE IF NOT EXISTS system_audit_logs (
+  id text PRIMARY KEY,
+  actor_id text REFERENCES users(id) ON DELETE SET NULL,
+  actor_name text NOT NULL,
+  action text NOT NULL,
+  entity_type text NOT NULL,
+  entity_id text,
+  department text,
+  details text NOT NULL DEFAULT '',
+  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+);
+
 ALTER TABLE notifications ADD COLUMN IF NOT EXISTS channel_id text;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS dedupe_key text;
 
 CREATE TABLE IF NOT EXISTS todos (
   id text PRIMARY KEY,
@@ -220,10 +262,15 @@ CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_code ON tasks(task_code);
 CREATE INDEX IF NOT EXISTS idx_task_assignees_user ON task_assignees(user_id, task_id);
 CREATE INDEX IF NOT EXISTS idx_task_reopen_events_task ON task_reopen_events(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_events_actor_type ON task_events(actor_id, event_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_files(task_id, uploaded_at);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_audit_created ON system_audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_department ON system_audit_logs(department, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_todos_user ON todos(user_id, is_completed, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_active_at);
 CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance_records(user_id, work_date DESC);

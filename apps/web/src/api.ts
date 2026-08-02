@@ -23,6 +23,16 @@ export type WorkerApproval = {
   approvedAt: string;
 };
 
+export type TaskEvent = {
+  id: string;
+  actorId?: string;
+  actorName: string;
+  type: string;
+  details: string;
+  createdAt: string;
+  createdAtIso?: string;
+};
+
 export type ManagedTask = {
   id: string;
   taskCode: string;
@@ -46,6 +56,7 @@ export type ManagedTask = {
   taskType: TaskType;
   complexity: number;
   reopenCount: number;
+  events: TaskEvent[];
   startedAt?: string;
   dueDate: string;
   progress: number;
@@ -58,7 +69,16 @@ export type ManagedTask = {
   messages: TaskMessage[];
 };
 
-export type PerformanceTask = Pick<ManagedTask, "id" | "department" | "status" | "complexity" | "startedAt" | "createdAt" | "completedAtIso" | "dueDate" | "assigneeIds" | "reopenCount">;
+export type PerformanceTask = Pick<ManagedTask, "id" | "department" | "status" | "priority" | "taskType" | "progress" | "complexity" | "startedAt" | "createdAt" | "completedAtIso" | "dueDate" | "assigneeIds" | "reopenCount">;
+
+export type OperationalIntelligence = {
+  generatedAt: string;
+  portfolio: { activeTasks: number; highRiskTasks: number; overloadedUsers: number; unassignedTasks: number; healthScore: number };
+  taskInsights: Array<{ taskId: string; delayRisk: number; riskLevel: string; priorityScore: number; smartPriority: string; benchmarkDays?: number | null; suggestedAssigneeId?: string; reasons: string[] }>;
+  workforceInsights: Array<{ userId: string; activeTasks: number; complexityLoad: number; urgentTasks: number; overdueTasks: number; blockedTasks: number; burnoutRisk: number; level: string; reasons: string[] }>;
+};
+
+export type AuditLog = { id: string; actorName: string; action: string; entityType: string; entityId?: string; department?: string; details: string; createdAt: string; createdAtIso?: string };
 
 export type AttendanceProfile = {
   userId: string;
@@ -141,6 +161,8 @@ export type BootstrapData = {
   tasks: ManagedTask[];
   performanceTasks: PerformanceTask[];
   attendanceProfiles: AttendanceProfile[];
+  intelligence: OperationalIntelligence;
+  auditLogs: AuditLog[];
   projects: Project[];
   notifications: AppNotification[];
   todos: TodoItem[];
@@ -287,7 +309,7 @@ export const api = {
     request(`/api/users/${user.id}`, { method: "PUT", body: JSON.stringify(user) }),
   deleteUser: (userId: string) => request(`/api/users/${userId}`, { method: "DELETE" }),
   async createTask(
-    task: Omit<ManagedTask, "id" | "taskCode" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso" | "startedAt" | "workerApprovals" | "pendingApprovalNames" | "reopenCount">,
+    task: Omit<ManagedTask, "id" | "taskCode" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso" | "startedAt" | "workerApprovals" | "pendingApprovalNames" | "reopenCount" | "events">,
     files: File[] = []
   ) {
     return request("/api/tasks", {
@@ -298,10 +320,11 @@ export const api = {
   updateTask: (task: ManagedTask) =>
     request(`/api/tasks/${task.id}`, { method: "PUT", body: JSON.stringify(task) }),
   deleteTask: (taskId: string) => request(`/api/tasks/${taskId}`, { method: "DELETE" }),
-  taskAction: (taskId: string, action: "claim" | "claim-approve" | "claim-reject" | "submit" | "approve", body = {}) =>
+  taskAction: (taskId: string, action: "view" | "claim" | "claim-approve" | "claim-reject" | "submit" | "approve", body = {}) =>
     request(`/api/tasks/${taskId}/${action}`, { method: "POST", body: JSON.stringify(body) }),
   reopenTask: (taskId: string, comment: string) =>
     request(`/api/tasks/${taskId}/reopen`, { method: "POST", body: JSON.stringify({ comment }) }),
+  trackTaskView: (taskId: string) => request(`/api/tasks/${taskId}/view`, { method: "POST", body: "{}" }),
   addMessage: (taskId: string, body: string) =>
     request(`/api/tasks/${taskId}/messages`, { method: "POST", body: JSON.stringify({ body }) }),
   updateTaskMessage: (taskId: string, messageId: string, body: string) =>
@@ -370,5 +393,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message, history })
     }),
-  markNotificationsRead: () => request("/api/notifications/read", { method: "POST" })
+  markNotificationsRead: () => request("/api/notifications/read", { method: "POST" }),
+  markNotificationRead: (notificationId: string) => request(`/api/notifications/${notificationId}/read`, { method: "POST", body: "{}" })
 };

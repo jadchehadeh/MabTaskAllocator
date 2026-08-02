@@ -7,6 +7,7 @@ import { Readable } from "node:stream";
 import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
 import ExcelJS from "exceljs";
+import { buildOperationalIntelligence } from "./intelligence.mjs";
 
 const { Pool } = pg;
 const port = Number(process.env.PORT ?? 4000);
@@ -15,6 +16,9 @@ const attachmentsPath = resolve(process.env.ATTACHMENTS_PATH ?? join(appDirector
 const sessionIdleMinutes = 10;
 const maxFileSize = 10 * 1024 * 1024;
 const maxFilesPerUpload = 5;
+const isProduction = process.env.NODE_ENV === "production";
+const corsOrigins = String(process.env.CORS_ORIGINS ?? "").split(",").map((origin) => origin.trim()).filter(Boolean);
+const loginAttempts = new Map();
 const taskTypes = ["Technical", "QS", "Shop Drawings", "BIM", "Variation"];
 const connectionString =
   process.env.DATABASE_URL ??
@@ -101,12 +105,23 @@ function passwordMatches(password, storedHash) {
   return stored.length === supplied.length && timingSafeEqual(stored, supplied);
 }
 
+function validatePassword(password) {
+  if (password.length < 10 || !/[a-z]/i.test(password) || !/\d/.test(password)) {
+    const error = new Error("Passwords must contain at least 10 characters, including a letter and a number.");
+    error.status = 400;
+    throw error;
+  }
+}
+
 const superadminExists = await db.prepare("SELECT id FROM users WHERE role = 'superadmin' LIMIT 1").get();
 if (!superadminExists) {
+  const initialPassword = process.env.INITIAL_SUPERADMIN_PASSWORD || (isProduction ? "" : "jadjadjad1");
+  if (!initialPassword) throw new Error("INITIAL_SUPERADMIN_PASSWORD is required when creating the first production superadmin.");
+  validatePassword(initialPassword);
   await db.prepare(`
     INSERT INTO users (id, name, username, password_hash, role, department)
     VALUES (?, ?, ?, ?, 'superadmin', 'Executive')
-  `).run("user-superadmin", "J. Chehade", "j.chehade@mabunited.com", hashPassword("jadjadjad1"));
+  `).run("user-superadmin", process.env.INITIAL_SUPERADMIN_NAME || "J. Chehade", process.env.INITIAL_SUPERADMIN_USERNAME || "j.chehade@mabunited.com", hashPassword(initialPassword));
 }
 
 function publicUser(row) {
@@ -166,6 +181,20 @@ async function getTask(taskId) {
   `).get(taskId);
 }
 
+async function recordTaskEvent(taskId, actor, eventType, details = "") {
+  await db.prepare(`
+    INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(randomUUID(), taskId, actor?.id ?? null, actor?.name ?? "System", eventType, String(details).slice(0, 1000));
+}
+
+async function audit(actor, action, entityType, entityId, department, details = "") {
+  await db.prepare(`
+    INSERT INTO system_audit_logs (id, actor_id, actor_name, action, entity_type, entity_id, department, details)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(randomUUID(), actor?.id ?? null, actor?.name ?? "System", action, entityType, entityId ?? null, department ?? null, String(details).slice(0, 2000));
+}
+
 async function todosFor(userId) {
   return (await db.prepare(`
     SELECT todos.*, tasks.task_code, tasks.title AS task_title
@@ -186,6 +215,18 @@ async function todosFor(userId) {
 
 async function serializeTask(row) {
   const reopenCount = (await db.prepare("SELECT count(*) AS count FROM task_reopen_events WHERE task_id = ?").get(row.id)).count;
+  const events = (await db.prepare(`
+    SELECT id, actor_id, actor_name, event_type, details, created_at
+    FROM task_events WHERE task_id = ? ORDER BY created_at ASC
+  `).all(row.id)).map((event) => ({
+    id: event.id,
+    actorId: event.actor_id ?? undefined,
+    actorName: event.actor_name,
+    type: event.event_type,
+    details: event.details,
+    createdAt: formatDate(event.created_at),
+    createdAtIso: isoDateTime(event.created_at)
+  }));
   const messages = (await db.prepare(`
     SELECT id, author_id, author_name, body, created_at FROM task_messages
     WHERE task_id = ? ORDER BY created_at ASC
@@ -245,6 +286,7 @@ async function serializeTask(row) {
     taskType: row.task_type ?? "Technical",
     complexity: normalizeComplexity(row.complexity),
     reopenCount,
+    events,
     startedAt: isoDateTime(row.started_at),
     dueDate: row.due_date ?? "",
     progress: row.progress,
@@ -265,6 +307,9 @@ async function serializePerformanceTask(row) {
     id: row.id,
     department: row.department,
     status: row.status,
+    priority: row.priority,
+    taskType: row.task_type ?? "Technical",
+    progress: row.progress,
     complexity: normalizeComplexity(row.complexity),
     startedAt: isoDateTime(row.started_at),
     createdAt: isoDateTime(row.created_at),
@@ -273,6 +318,36 @@ async function serializePerformanceTask(row) {
     assigneeIds,
     reopenCount
   };
+}
+
+async function serializePerformanceTasks(rows) {
+  if (!rows.length) return [];
+  const placeholders = rows.map(() => "?").join(",");
+  const ids = rows.map((row) => row.id);
+  const assigneeRows = await db.prepare(`SELECT task_id, user_id FROM task_assignees WHERE task_id IN (${placeholders})`).all(...ids);
+  const reopenRows = await db.prepare(`SELECT task_id, count(*) AS count FROM task_reopen_events WHERE task_id IN (${placeholders}) GROUP BY task_id`).all(...ids);
+  const assigneesByTask = new Map();
+  for (const assignee of assigneeRows) {
+    const list = assigneesByTask.get(assignee.task_id) ?? [];
+    list.push(assignee.user_id);
+    assigneesByTask.set(assignee.task_id, list);
+  }
+  const reopensByTask = new Map(reopenRows.map((row) => [row.task_id, row.count]));
+  return rows.map((row) => ({
+    id: row.id,
+    department: row.department,
+    status: row.status,
+    priority: row.priority,
+    taskType: row.task_type ?? "Technical",
+    progress: row.progress,
+    complexity: normalizeComplexity(row.complexity),
+    startedAt: isoDateTime(row.started_at),
+    createdAt: isoDateTime(row.created_at),
+    completedAtIso: isoDateTime(row.completed_at),
+    dueDate: row.due_date ?? "",
+    assigneeIds: assigneesByTask.get(row.id) ?? [],
+    reopenCount: reopensByTask.get(row.id) ?? 0
+  }));
 }
 
 async function projectsFor(actor) {
@@ -456,12 +531,39 @@ async function parseTaskSheet(file) {
   return tasks;
 }
 
-async function notify(userId, kind, title, body, taskId, channelId) {
+async function notify(userId, kind, title, body, taskId, channelId, dedupeKey) {
   if (!userId) return;
   await db.prepare(`
-    INSERT INTO notifications (id, user_id, kind, title, body, task_id, channel_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(randomUUID(), userId, kind, title, body, taskId ?? null, channelId ?? null);
+    INSERT INTO notifications (id, user_id, kind, title, body, task_id, channel_id, dedupe_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+  `).run(randomUUID(), userId, kind, title, body, taskId ?? null, channelId ?? null, dedupeKey ?? null);
+}
+
+async function runTaskReminders() {
+  const today = riyadhDate();
+  const tomorrow = new Date(`${today}T00:00:00+03:00`);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowDate = tomorrow.toISOString().slice(0, 10);
+  const tasks = await db.prepare(`
+    SELECT * FROM tasks WHERE status != 'done'
+      AND (due_date <= ? OR status IN ('blocked', 'under_review'))
+  `).all(tomorrowDate);
+  for (const task of tasks) {
+    const assigneeIds = await taskAssigneeIds(task.id);
+    if (task.due_date && task.due_date <= tomorrowDate) {
+      const overdue = task.due_date < today;
+      for (const userId of assigneeIds) {
+        await notify(userId, "reminder", overdue ? "Task overdue" : "Task due soon", `${task.task_code}: ${task.title} · due ${task.due_date}`, task.id, null, `${today}:due:${task.id}:${userId}`);
+      }
+    }
+    if (["blocked", "under_review"].includes(task.status)) {
+      const managers = await db.prepare("SELECT id FROM users WHERE role = 'superadmin' OR (role = 'admin' AND lower(trim(department)) = lower(trim(?)))").all(task.department);
+      for (const manager of managers) {
+        await notify(manager.id, "reminder", task.status === "blocked" ? "Blocked task needs attention" : "Task awaiting review", `${task.task_code}: ${task.title}`, task.id, null, `${today}:${task.status}:${task.id}:${manager.id}`);
+      }
+    }
+  }
 }
 
 async function notifyTaskAudience(task, actorId, title, body) {
@@ -694,8 +796,14 @@ function send(response, status, data) {
   response.writeHead(status, {
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Origin": "*",
-    "Content-Type": "application/json"
+    ...(response.corsOrigin ? { "Access-Control-Allow-Origin": response.corsOrigin, Vary: "Origin" } : {}),
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+    "Content-Type": "application/json",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-Request-Id": response.requestId || ""
   });
   response.end(JSON.stringify(data));
 }
@@ -706,11 +814,13 @@ function sendBinary(response, status, data, contentType, filename) {
   response.writeHead(status, {
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Origin": "*",
+    ...(response.corsOrigin ? { "Access-Control-Allow-Origin": response.corsOrigin, Vary: "Origin" } : {}),
     "Access-Control-Expose-Headers": "Content-Disposition",
     "Content-Disposition": `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(originalFilename)}`,
     "Content-Length": data.length,
-    "Content-Type": contentType
+    "Content-Type": contentType,
+    "X-Content-Type-Options": "nosniff",
+    "X-Request-Id": response.requestId || ""
   });
   response.end(data);
 }
@@ -1106,6 +1216,12 @@ async function requireDepartment(name) {
 }
 
 const server = createServer(async (request, response) => {
+  response.requestId = randomUUID();
+  const requestOrigin = String(request.headers.origin ?? "");
+  response.corsOrigin = requestOrigin && (corsOrigins.includes(requestOrigin) || (!isProduction && !corsOrigins.length)) ? requestOrigin : "";
+  if (requestOrigin && isProduction && corsOrigins.length && !corsOrigins.includes(requestOrigin)) {
+    return send(response, 403, { message: "Origin is not allowed." });
+  }
   if (request.method === "OPTIONS") return send(response, 204, {});
 
   try {
@@ -1119,10 +1235,21 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && path === "/api/auth/login") {
-      const row = await db.prepare("SELECT * FROM users WHERE lower(username) = lower(?)").get(String(body.username ?? "").trim());
+      const username = String(body.username ?? "").trim().toLocaleLowerCase();
+      const address = String(request.headers["x-forwarded-for"] ?? request.socket.remoteAddress ?? "unknown").split(",")[0].trim();
+      const attemptKey = `${address}:${username}`;
+      const attempt = loginAttempts.get(attemptKey);
+      if (attempt?.blockedUntil > Date.now()) {
+        response.setHeader("Retry-After", Math.ceil((attempt.blockedUntil - Date.now()) / 1000));
+        return send(response, 429, { message: "Too many login attempts. Try again later." });
+      }
+      const row = await db.prepare("SELECT * FROM users WHERE lower(username) = lower(?)").get(username);
       if (!row || !passwordMatches(String(body.password ?? ""), row.password_hash)) {
+        const failures = (attempt?.failures ?? 0) + 1;
+        loginAttempts.set(attemptKey, { failures, blockedUntil: failures >= 5 ? Date.now() + 15 * 60_000 : 0 });
         return send(response, 401, { message: "Username or password is incorrect." });
       }
+      loginAttempts.delete(attemptKey);
       const token = randomBytes(32).toString("hex");
       await db.prepare("INSERT INTO sessions (token, user_id, last_active_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(token, row.id);
       await recordAttendance(row.id, true);
@@ -1207,7 +1334,10 @@ const server = createServer(async (request, response) => {
       const performanceRows = actor.role === "superadmin"
         ? taskRows
         : taskRows.filter((task) => sameDepartment(task.department, actor.department));
-      const performanceTasks = await Promise.all(performanceRows.map(serializePerformanceTask));
+      const performanceTasks = await serializePerformanceTasks(performanceRows);
+      const intelligence = buildOperationalIntelligence(performanceTasks, users.filter((user) =>
+        actor.role === "superadmin" || sameDepartment(user.department, actor.department)
+      ));
       const attendanceUsers = actor.role === "superadmin"
         ? await db.prepare("SELECT id, created_at FROM users WHERE role = 'user' ORDER BY name").all()
         : await db.prepare("SELECT id, created_at FROM users WHERE role = 'user' AND lower(trim(department)) = lower(trim(?)) ORDER BY name").all(actor.department);
@@ -1237,15 +1367,31 @@ const server = createServer(async (request, response) => {
         isRead: Boolean(item.is_read),
         createdAt: formatDate(item.created_at)
       }));
+      const auditRows = actor.role === "user" ? [] : actor.role === "superadmin"
+        ? await db.prepare("SELECT * FROM system_audit_logs ORDER BY created_at DESC LIMIT 150").all()
+        : await db.prepare("SELECT * FROM system_audit_logs WHERE lower(trim(department)) = lower(trim(?)) ORDER BY created_at DESC LIMIT 150").all(actor.department);
+      const auditLogs = auditRows.map((entry) => ({
+        id: entry.id,
+        actorName: entry.actor_name,
+        action: entry.action,
+        entityType: entry.entity_type,
+        entityId: entry.entity_id ?? undefined,
+        department: entry.department ?? undefined,
+        details: entry.details,
+        createdAt: formatDate(entry.created_at),
+        createdAtIso: isoDateTime(entry.created_at)
+      }));
       return send(response, 200, {
         currentUser: actor,
         departments,
         users,
         tasks,
         performanceTasks,
+        intelligence,
         attendanceProfiles,
         projects: await projectsFor(actor),
         notifications,
+        auditLogs,
         todos: await todosFor(actor.id),
         ...(await chatDataFor(actor))
       });
@@ -1261,6 +1407,7 @@ const server = createServer(async (request, response) => {
       if (existing) return send(response, 409, { message: "This department already exists." });
       await db.prepare("INSERT INTO departments (id, name, created_by_id) VALUES (?, ?, ?)")
         .run(`department-${randomUUID()}`, name, actor.id);
+      await audit(actor, "created", "department", name, name, `Created department ${name}`);
       return send(response, 201, { department: name });
     }
 
@@ -1324,10 +1471,12 @@ const server = createServer(async (request, response) => {
       validateUserScope(actor, target);
       target.department = target.role === "superadmin" ? "Executive" : await requireDepartment(target.department);
       if (!target.name || !target.username || !target.password) throw new Error("Name, username, and password are required.");
+      validatePassword(target.password);
       await db.prepare(`
         INSERT INTO users (id, name, username, password_hash, role, department)
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(target.id, target.name, target.username, hashPassword(target.password), target.role, target.department);
+      await audit(actor, "created", "user", target.id, target.department, `Created ${target.role} ${target.name} (${target.username})`);
       return send(response, 201, { user: publicUser(target) });
     }
 
@@ -1347,7 +1496,11 @@ const server = createServer(async (request, response) => {
       if (!target.name || !target.username) throw new Error("Name and username are required.");
       await db.prepare("UPDATE users SET name = ?, username = ?, role = ?, department = ? WHERE id = ?")
         .run(target.name, target.username, target.role, target.department, target.id);
-      if (body.password) await db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(body.password), target.id);
+      if (body.password) {
+        validatePassword(String(body.password));
+        await db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(body.password), target.id);
+      }
+      await audit(actor, "updated", "user", target.id, target.department, `Updated ${target.name}${body.password ? " and reset password" : ""}`);
       return send(response, 200, { user: publicUser(target) });
     }
 
@@ -1356,6 +1509,7 @@ const server = createServer(async (request, response) => {
       if (!target) return send(response, 404, { message: "User not found." });
       validateUserScope(actor, target);
       if (target.id === actor.id || target.role === "superadmin") return send(response, 403, { message: "This user cannot be deleted." });
+      await audit(actor, "deleted", "user", target.id, target.department, `Deleted ${target.name} (${target.username})`);
       await db.prepare("DELETE FROM users WHERE id = ?").run(target.id);
       await db.exec(`
         UPDATE tasks SET assignee_id = (SELECT user_id FROM task_assignees WHERE task_id = tasks.id LIMIT 1)
@@ -1382,6 +1536,7 @@ const server = createServer(async (request, response) => {
           await db.prepare("INSERT INTO project_members (project_id, user_id) VALUES (?, ?)").run(id, member.id);
         }
       });
+      await audit(actor, "created", "project", id, department, `Created project ${name} with ${members.length} member(s)`);
       return send(response, 201, { project: (await projectsFor(actor)).find((project) => project.id === id) });
     }
 
@@ -1430,6 +1585,7 @@ const server = createServer(async (request, response) => {
           for (const userId of assigneeIds) {
             await db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(id, userId);
           }
+          await recordTaskEvent(id, actor, "created", assigneeIds.length ? `Task imported and assigned to ${assigneeIds.length} user(s)` : "Unassigned task imported");
           createdIds.push(id);
         }
       });
@@ -1437,6 +1593,7 @@ const server = createServer(async (request, response) => {
         await ensureTaskChatGroup(id);
         for (const userId of await taskAssigneeIds(id)) await notify(userId, "assignment", "Imported project task", `A task was imported into ${project.name}.`, id);
       }
+      await audit(actor, "imported", "project", project.id, project.department, `Imported ${createdIds.length} task(s) into ${project.name}`);
       await touchSession(request);
       return send(response, 201, { imported: createdIds.length });
     }
@@ -1468,6 +1625,7 @@ const server = createServer(async (request, response) => {
             AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_id = tasks.id)
         `).run(project.id);
       });
+      await audit(actor, "updated", "project", project.id, project.department, `Updated project ${project.name} with ${members.length} member(s)`);
       return send(response, 200, { project: (await projectsFor(actor)).find((item) => item.id === project.id) });
     }
 
@@ -1477,6 +1635,7 @@ const server = createServer(async (request, response) => {
       if (!project) return send(response, 404, { message: "Project not found." });
       if (actor.role === "admin" && !sameDepartment(project.department, actor.department)) return send(response, 403, { message: "You cannot delete this project." });
       await db.prepare("UPDATE tasks SET project_id = NULL WHERE project_id = ?").run(project.id);
+      await audit(actor, "deleted", "project", project.id, project.department, `Deleted project ${project.name}`);
       await db.prepare("DELETE FROM projects WHERE id = ?").run(project.id);
       return send(response, 200, { ok: true });
     }
@@ -1514,6 +1673,8 @@ const server = createServer(async (request, response) => {
       `).run(task.id, task.taskCode, task.title, task.department, task.priority, task.status, task.assigneeIds[0] ?? null,
         task.projectId, task.taskType, task.dueDate, task.complexity, task.assigneeIds.length ? 1 : 0, task.progress, actor.id);
       await setTaskAssignees(task.id, task.assigneeIds);
+      await recordTaskEvent(task.id, actor, "created", task.assigneeIds.length ? `Task created and assigned to ${task.assigneeIds.length} user(s)` : "Unassigned task created");
+      await audit(actor, "created", "task", task.id, task.department, `Created ${task.taskCode}: ${task.title}`);
       try {
         await saveTaskFiles(task.id, actor, body.files);
       } catch (error) {
@@ -1530,6 +1691,7 @@ const server = createServer(async (request, response) => {
       const existing = await getTask(taskMatch[1]);
       if (!existing) return send(response, 404, { message: "Task not found." });
       if (!canManage(actor, existing)) return send(response, 403, { message: "You cannot edit this task." });
+      if (existing.status === "done") return send(response, 409, { message: "Completed tasks must be reopened before they can be edited." });
       const project = body.projectId ? await db.prepare("SELECT * FROM projects WHERE id = ?").get(body.projectId) : null;
       if (body.projectId && !project) return send(response, 404, { message: "Project not found." });
       const requestedIds = Array.isArray(body.assigneeIds) ? body.assigneeIds : body.assigneeId ? [body.assigneeId] : [];
@@ -1542,7 +1704,11 @@ const server = createServer(async (request, response) => {
       const dueDate = assignees.length
         ? (String(body.dueDate ?? existing.due_date ?? "").slice(0, 10) || null)
         : null;
-      const status = assignees.length ? body.status : "new";
+      const requestedStatus = String(body.status ?? existing.status);
+      if (["done", "under_review"].includes(requestedStatus) && requestedStatus !== existing.status) {
+        return send(response, 409, { message: "Use the submit and approval workflow to complete a task." });
+      }
+      const status = assignees.length ? requestedStatus : "new";
       const progress = assignees.length ? Math.max(0, Math.min(100, Number(body.progress) || 0)) : 0;
       await db.prepare(`
         UPDATE tasks SET title = ?, department = ?, priority = ?, status = ?, assignee_id = ?, project_id = ?, task_type = ?, due_date = ?, complexity = ?,
@@ -1553,6 +1719,16 @@ const server = createServer(async (request, response) => {
         project?.id ?? null, normalizeTaskType(body.taskType), dueDate, complexity,
         assignees.length ? 1 : 0, progress, existing.id);
       await setTaskAssignees(existing.id, assignees.map((assignee) => assignee.id));
+      const nextIds = assignees.map((assignee) => assignee.id);
+      const changes = [];
+      if (String(body.title).trim() !== existing.title) changes.push(`Title: “${existing.title}” → “${String(body.title).trim()}”`);
+      if (body.priority !== existing.priority) changes.push(`Priority: ${existing.priority} → ${body.priority}`);
+      if (status !== existing.status) changes.push(`Status: ${existing.status} → ${status}`);
+      if ((existing.due_date ?? "") !== (dueDate ?? "")) changes.push(`Deadline: ${existing.due_date || "none"} → ${dueDate || "none"}`);
+      if (normalizeComplexity(existing.complexity) !== complexity) changes.push(`Complexity: ${normalizeComplexity(existing.complexity)} → ${complexity}`);
+      const assignmentChanged = [...previousIds].sort().join(",") !== [...nextIds].sort().join(",");
+      if (assignmentChanged) changes.push(`Assignees: ${previousIds.length || "none"} → ${nextIds.length || "none"}`);
+      await recordTaskEvent(existing.id, actor, assignmentChanged ? "reassigned" : "updated", changes.join(" · ") || "Task details saved");
       if (body.status === "done") await deleteTaskChatGroup(existing.id);
       for (const assignee of assignees.filter((item) => !previousIds.includes(item.id))) {
         await notify(assignee.id, "assignment", "Task allocated", `You were assigned: ${body.title}`, existing.id);
@@ -1565,6 +1741,7 @@ const server = createServer(async (request, response) => {
       if (!task) return send(response, 404, { message: "Task not found." });
       if (!canManage(actor, task)) return send(response, 403, { message: "You cannot delete this task." });
       const files = await db.prepare("SELECT storage_name FROM task_files WHERE task_id = ?").all(task.id);
+      await audit(actor, "deleted", "task", task.id, task.department, `Deleted ${task.task_code}: ${task.title}`);
       await deleteTaskChatGroup(task.id);
       await db.prepare("DELETE FROM tasks WHERE id = ?").run(task.id);
       for (const file of files) {
@@ -1586,19 +1763,33 @@ const server = createServer(async (request, response) => {
         const nextBody = String(body.body ?? "").trim().slice(0, 2000);
         if (!nextBody) throw new Error("Comment cannot be empty.");
         await db.prepare("UPDATE task_messages SET body = ? WHERE id = ?").run(nextBody, message.id);
+        await recordTaskEvent(task.id, actor, "comment_edited", `Edited comment: ${nextBody.slice(0, 180)}`);
       } else {
         await db.prepare("DELETE FROM task_messages WHERE id = ?").run(message.id);
+        await recordTaskEvent(task.id, actor, "comment_deleted", `Deleted comment: ${message.body.slice(0, 180)}`);
       }
       await touchSession(request);
       return send(response, 200, { task: await serializeTask(task) });
     }
 
-    const actionMatch = path.match(/^\/api\/tasks\/([^/]+)\/(claim|claim-approve|claim-reject|submit|approve|reopen|messages|files)$/);
+    const actionMatch = path.match(/^\/api\/tasks\/([^/]+)\/(view|claim|claim-approve|claim-reject|submit|approve|reopen|messages|files)$/);
     if (actionMatch && request.method === "POST") {
       const task = await getTask(actionMatch[1]);
       if (!task) return send(response, 404, { message: "Task not found." });
       const action = actionMatch[2];
       const assignedUserIds = await taskAssigneeIds(task.id);
+
+      if (action === "view") {
+        if (!await canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
+        const recentView = await db.prepare(`
+          SELECT id FROM task_events WHERE task_id = ? AND actor_id = ? AND event_type = 'viewed'
+            AND created_at::timestamp > timezone('UTC', now() - interval '5 minutes')
+          LIMIT 1
+        `).get(task.id, actor.id);
+        if (!recentView) await recordTaskEvent(task.id, actor, "viewed", "Opened the task workspace");
+        await touchSession(request);
+        return send(response, 200, { ok: true });
+      }
 
       if (action === "claim") {
         if (actor.role !== "user" || !sameDepartment(actor.department, task.department) || assignedUserIds.length || !await canView(actor, task)) return send(response, 403, { message: "This task cannot be claimed." });
@@ -1609,6 +1800,7 @@ const server = createServer(async (request, response) => {
         `).run(actor.id, task.id, task.id);
         if (!result.changes) return send(response, 409, { message: "Another claim request is already waiting for approval." });
         await notifyTaskManagers(task, actor.id, "Task claim needs approval", `${actor.name} requested to take ${task.task_code}: ${task.title}`, task.id);
+        await recordTaskEvent(task.id, actor, "claim_requested", "Requested to take this task");
       }
       if (action === "claim-approve") {
         if (!canManage(actor, task)) return send(response, 403, { message: "Manager approval is required." });
@@ -1624,6 +1816,7 @@ const server = createServer(async (request, response) => {
           `).run(requester.id, null, task.id);
         });
         await notify(requester.id, "claim", "Task claim approved", `${actor.name} approved your request for ${task.task_code}: ${task.title}`, task.id);
+        await recordTaskEvent(task.id, actor, "claim_approved", `${requester.name} was assigned and the task started`);
       }
       if (action === "claim-reject") {
         if (!canManage(actor, task)) return send(response, 403, { message: "Manager approval is required." });
@@ -1631,10 +1824,13 @@ const server = createServer(async (request, response) => {
         const requesterId = task.claim_requested_by_id;
         await db.prepare("UPDATE tasks SET claim_requested_by_id = NULL, claim_requested_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
         await notify(requesterId, "claim", "Task claim declined", `${actor.name} declined your request for ${task.task_code}: ${task.title}`, task.id);
+        await recordTaskEvent(task.id, actor, "claim_rejected", "Task claim request declined");
       }
       if (action === "submit") {
         if (actor.role !== "user" || !assignedUserIds.includes(actor.id) || ["done", "under_review"].includes(task.status)) return send(response, 403, { message: "This task cannot be submitted." });
-        await db.prepare("INSERT OR IGNORE INTO task_worker_approvals (task_id, user_id) VALUES (?, ?)").run(task.id, actor.id);
+        const submitted = await db.prepare("INSERT OR IGNORE INTO task_worker_approvals (task_id, user_id) VALUES (?, ?)").run(task.id, actor.id);
+        if (!submitted.changes) return send(response, 409, { message: "You already submitted this task for review." });
+        await recordTaskEvent(task.id, actor, "worker_finished", `${actor.name} finished their work and submitted it for review`);
         const approvedIds = (await db.prepare("SELECT user_id FROM task_worker_approvals WHERE task_id = ?").all(task.id)).map((item) => item.user_id);
         const remainingIds = assignedUserIds.filter((userId) => !approvedIds.includes(userId));
         if (remainingIds.length) {
@@ -1649,15 +1845,19 @@ const server = createServer(async (request, response) => {
         if (!canManage(actor, task) || task.status !== "under_review") return send(response, 403, { message: "This task cannot be approved." });
         await db.prepare("UPDATE tasks SET status = 'done', progress = 100, review_comment = 'Approved.', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
         await deleteTaskChatGroup(task.id);
+        await recordTaskEvent(task.id, actor, "approved", "Manager approved the work and completed the task");
         for (const userId of assignedUserIds) await notify(userId, "approval", "Task approved", `${actor.name} approved: ${task.title}`, task.id);
       }
       if (action === "reopen") {
         const comment = String(body.comment ?? "").trim();
-        if (!canManage(actor, task) || task.status !== "under_review" || !comment) return send(response, 403, { message: "A review comment is required." });
+        if (!canManage(actor, task) || !["under_review", "done"].includes(task.status) || !comment) return send(response, 403, { message: "A review comment is required." });
+        const reopenedAfterCompletion = task.status === "done";
         await db.prepare("UPDATE tasks SET status = 'in_progress', progress = MIN(progress, 90), review_comment = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(comment, task.id);
         await db.prepare("INSERT INTO task_reopen_events (id, task_id, reviewer_id, comment) VALUES (?, ?, ?, ?)")
           .run(randomUUID(), task.id, actor.id, comment);
         await db.prepare("DELETE FROM task_worker_approvals WHERE task_id = ?").run(task.id);
+        await ensureTaskChatGroup(task.id);
+        await recordTaskEvent(task.id, actor, "reopened", `${reopenedAfterCompletion ? "Completed task reopened" : "Review rejected"}: ${comment}`);
         for (const userId of assignedUserIds) await notify(userId, "review", "Task reopened", `${actor.name}: ${comment}`, task.id);
       }
       if (action === "messages") {
@@ -1667,12 +1867,15 @@ const server = createServer(async (request, response) => {
         if (!message) throw new Error("Message cannot be empty.");
         await db.prepare("INSERT INTO task_messages (id, task_id, author_id, author_name, body) VALUES (?, ?, ?, ?, ?)")
           .run(randomUUID(), task.id, actor.id, actor.name, message);
+        await recordTaskEvent(task.id, actor, "commented", message.slice(0, 240));
         await notifyTaskAudience(task, actor.id, `New chat on ${task.title}`, `${actor.name}: ${message}`);
       }
       if (action === "files") {
         if (!await canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
         if (task.status === "done") return send(response, 409, { message: "Approved tasks are locked. Existing documents remain available for download." });
-        await saveTaskFiles(task.id, actor, body.files);
+        const uploadedFiles = Array.isArray(body.files) ? body.files : [];
+        await saveTaskFiles(task.id, actor, uploadedFiles);
+        await recordTaskEvent(task.id, actor, "files_uploaded", `Uploaded ${uploadedFiles.length} file(s): ${uploadedFiles.map((file) => basename(String(file.name ?? "attachment"))).join(", ").slice(0, 600)}`);
       }
       await touchSession(request);
       return send(response, 200, { task: await serializeTask(await getTask(task.id)) });
@@ -1680,6 +1883,13 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && path === "/api/notifications/read") {
       await db.prepare("UPDATE notifications SET is_read = 1 WHERE user_id = ?").run(actor.id);
+      return send(response, 200, { ok: true });
+    }
+
+    const notificationReadMatch = path.match(/^\/api\/notifications\/([^/]+)\/read$/);
+    if (request.method === "POST" && notificationReadMatch) {
+      const result = await db.prepare("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?").run(notificationReadMatch[1], actor.id);
+      if (!result.changes) return send(response, 404, { message: "Notification not found." });
       return send(response, 200, { ok: true });
     }
 
@@ -1898,10 +2108,12 @@ const server = createServer(async (request, response) => {
 
     return send(response, 404, { message: "Route not found." });
   } catch (error) {
-    console.error(error);
-    const status = error.status ?? (error.code === "23505" ? 409 : 400);
-    const message = error.code === "23505" ? "This value already exists." : error.message;
-    return send(response, status, { message: message || "Unexpected server error." });
+    console.error(`[${response.requestId}]`, error);
+    const databaseConflict = error.code === "23505";
+    const knownClientError = error.status || databaseConflict || (!error.code && !(error instanceof TypeError));
+    const status = error.status ?? (databaseConflict ? 409 : knownClientError ? 400 : 500);
+    const message = status >= 500 ? "Unexpected server error." : databaseConflict ? "This value already exists." : error.message;
+    return send(response, status, { message: message || "Unexpected server error.", requestId: response.requestId });
   }
 });
 
@@ -1910,7 +2122,14 @@ server.listen(port, "0.0.0.0", () => {
   console.log("Database: PostgreSQL");
 });
 
+void runTaskReminders().catch((error) => console.error("Reminder automation failed", error));
+const reminderInterval = setInterval(() => {
+  void runTaskReminders().catch((error) => console.error("Reminder automation failed", error));
+}, 60 * 60 * 1000);
+reminderInterval.unref();
+
 async function shutdown() {
+  clearInterval(reminderInterval);
   server.close();
   await pool.end();
 }
