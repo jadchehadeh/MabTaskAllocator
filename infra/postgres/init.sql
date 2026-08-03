@@ -79,6 +79,13 @@ CREATE TABLE IF NOT EXISTS task_assignees (
   PRIMARY KEY (task_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS task_claim_requests (
+  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  requested_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+  PRIMARY KEY (task_id, user_id)
+);
+
 ALTER TABLE tasks ALTER COLUMN due_date DROP NOT NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS complexity integer NOT NULL DEFAULT 3;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at text;
@@ -94,6 +101,12 @@ UPDATE tasks SET started_at = created_at
 WHERE started_at IS NULL AND EXISTS (SELECT 1 FROM task_assignees WHERE task_assignees.task_id = tasks.id);
 UPDATE tasks SET due_date = NULL, started_at = NULL
 WHERE status != 'done' AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_assignees.task_id = tasks.id);
+
+INSERT INTO task_claim_requests (task_id, user_id, requested_at)
+SELECT id, claim_requested_by_id, COALESCE(claim_requested_at, created_at)
+FROM tasks
+WHERE claim_requested_by_id IS NOT NULL
+ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS task_worker_approvals (
   task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -261,6 +274,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_code ON tasks(task_code);
 CREATE INDEX IF NOT EXISTS idx_task_assignees_user ON task_assignees(user_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_task_claim_requests_user ON task_claim_requests(user_id, task_id);
 CREATE INDEX IF NOT EXISTS idx_task_reopen_events_task ON task_reopen_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_events_actor_type ON task_events(actor_id, event_type, created_at DESC);

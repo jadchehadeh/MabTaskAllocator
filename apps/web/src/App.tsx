@@ -26,6 +26,7 @@ import {
   RotateCcw,
   Save,
   Search,
+  Settings,
   ShieldCheck,
   Sparkles,
   Sun,
@@ -34,6 +35,8 @@ import {
   Upload,
   UserPlus,
   Users,
+  Volume2,
+  VolumeX,
   X
 } from "lucide-react";
 import type { AppUser, DepartmentName, TaskPriority, TaskStatus, TaskType, UserRole } from "@mab/shared";
@@ -54,6 +57,32 @@ const defaultDepartments: DepartmentName[] = [
 const taskTypes: TaskType[] = ["Technical", "QS", "Shop Drawings", "BIM", "Variation"];
 const complexityLabels = ["", "Very low", "Low", "Moderate", "High", "Very high"];
 const themeKeyPrefix = "mab-task-allocator.theme.";
+const settingsKeyPrefix = "mab-task-allocator.settings.";
+const announcedNotificationPrefix = "mab-task-allocator.notified.";
+
+type UserSettings = {
+  desktopNotifications: boolean;
+  notificationSound: boolean;
+  notificationVolume: number;
+  notificationPreview: boolean;
+  notifyOnlyWhenHidden: boolean;
+  backgroundNotifications: boolean;
+  autoRefresh: boolean;
+  compactMode: boolean;
+  reduceMotion: boolean;
+};
+
+const defaultSettings: UserSettings = {
+  desktopNotifications: false,
+  notificationSound: true,
+  notificationVolume: 55,
+  notificationPreview: true,
+  notifyOnlyWhenHidden: false,
+  backgroundNotifications: true,
+  autoRefresh: true,
+  compactMode: false,
+  reduceMotion: false
+};
 
 function storedDarkMode(ownerId: string) {
   const savedTheme = window.localStorage.getItem(`${themeKeyPrefix}${ownerId}`);
@@ -61,6 +90,43 @@ function storedDarkMode(ownerId: string) {
   return false;
 }
 const quickEmojis = ["👍", "✅", "👀", "🙏", "📌", "🚧", "🎉", "😊"];
+
+function storedUserSettings(ownerId: string): UserSettings {
+  try {
+    const savedSettings = window.localStorage.getItem(`${settingsKeyPrefix}${ownerId}`);
+    if (!savedSettings) return defaultSettings;
+    return { ...defaultSettings, ...JSON.parse(savedSettings) };
+  } catch {
+    return defaultSettings;
+  }
+}
+
+function browserNotificationsAvailable() {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+function playNotificationTone(volume: number) {
+  const AudioContextConstructor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextConstructor) return;
+  const context = new AudioContextConstructor();
+  const gain = context.createGain();
+  const firstTone = context.createOscillator();
+  const secondTone = context.createOscillator();
+  const start = context.currentTime;
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.01, volume / 100), start + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.42);
+  firstTone.frequency.setValueAtTime(720, start);
+  secondTone.frequency.setValueAtTime(920, start + 0.16);
+  firstTone.connect(gain);
+  secondTone.connect(gain);
+  gain.connect(context.destination);
+  firstTone.start(start);
+  firstTone.stop(start + 0.18);
+  secondTone.start(start + 0.16);
+  secondTone.stop(start + 0.42);
+  window.setTimeout(() => void context.close().catch(() => undefined), 800);
+}
 
 const priorityLabels: Record<TaskPriority, string> = {
   low: "Low",
@@ -114,8 +180,29 @@ const viewTitles = {
   attendance: "Attendance",
   intelligence: "Work Intelligence",
   audit: "Admin Audit",
-  chat: "Department Chat"
+  chat: "Department Chat",
+  settings: "Settings"
 } as const;
+
+type AppView = keyof typeof viewTitles;
+const appViews = Object.keys(viewTitles) as AppView[];
+
+function isAppView(value: string | null): value is AppView {
+  return Boolean(value && appViews.includes(value as AppView));
+}
+
+function viewFromUrl(): AppView {
+  const url = new URL(window.location.href);
+  const view = url.searchParams.get("view") || url.hash.replace(/^#\/?/, "");
+  return isAppView(view) ? view : "dashboard";
+}
+
+function urlForView(view: AppView) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", view);
+  url.hash = "";
+  return `${url.pathname}${url.search}`;
+}
 
 function clampProgress(progress: number) {
   return Math.min(100, Math.max(0, progress));
@@ -447,6 +534,13 @@ export function App() {
     darkMode: storedDarkMode("login"),
     ownerId: "login"
   }));
+  const [userSettingsPreference, setUserSettingsPreference] = useState(() => ({
+    settings: storedUserSettings("login"),
+    ownerId: "login"
+  }));
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() =>
+    browserNotificationsAvailable() ? Notification.permission : "denied"
+  );
   const [users, setUsers] = useState<AppUser[]>([]);
   const [departments, setDepartments] = useState<DepartmentName[]>(defaultDepartments);
   const [tasks, setTasks] = useState<ManagedTask[]>([]);
@@ -457,6 +551,8 @@ export function App() {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const knownNotificationIdsRef = useRef<Set<string>>(new Set());
+  const notificationHydratedRef = useRef(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [chatChannels, setChatChannels] = useState<ChatChannel[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -482,9 +578,10 @@ export function App() {
   const [aiMessages, setAiMessages] = useState<Array<{ role: "user" | "assistant"; text: string }>>([
     { role: "assistant", text: "Hello! I’m the MAB AI assistant. Ask me to help organize work, draft a task update, summarize an issue, or plan your day." }
   ]);
-  const [activeView, setActiveView] = useState<
-    "dashboard" | "projects" | "tasks" | "todos" | "finished" | "people" | "team" | "productivity" | "achievements" | "attendance" | "intelligence" | "audit" | "chat"
-  >("dashboard");
+  const [activeView, setActiveView] = useState<AppView>(() => viewFromUrl());
+  const navigationFromPopRef = useRef(false);
+  const appNavigationDepthRef = useRef(0);
+  const [canGoBackInApp, setCanGoBackInApp] = useState(false);
   const [activeTaskSection, setActiveTaskSection] = useState<"assigned" | "free">("assigned");
   const [managerTaskSection, setManagerTaskSection] = useState<"all" | "review" | "free">("all");
   const [showNotifications, setShowNotifications] = useState(false);
@@ -501,9 +598,8 @@ export function App() {
   const [taskEditDraft, setTaskEditDraft] = useState<ManagedTask | null>(null);
   const [assigningTaskId, setAssigningTaskId] = useState<string | null>(null);
   const [assignDraft, setAssignDraft] = useState<{ assigneeIds: string[]; dueDate: string }>({ assigneeIds: [], dueDate: "" });
+  const [claimSelection, setClaimSelection] = useState<Record<string, string[]>>({});
   const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
-  const [editingTaskMessageId, setEditingTaskMessageId] = useState("");
-  const [taskMessageEditDraft, setTaskMessageEditDraft] = useState("");
   const [taskMessageStatus, setTaskMessageStatus] = useState<Record<string, string>>({});
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
   const [taskFiles, setTaskFiles] = useState<File[]>([]);
@@ -518,12 +614,22 @@ export function App() {
 
   const themeOwnerId = currentUser?.id ?? "login";
   const darkMode = themePreference.darkMode;
+  const userSettings = userSettingsPreference.ownerId === themeOwnerId
+    ? userSettingsPreference.settings
+    : storedUserSettings(themeOwnerId);
+  const desktopNotificationsSupported = browserNotificationsAvailable();
+  const desktopNotificationsEnabled = userSettings.desktopNotifications && notificationPermission === "granted";
 
   useEffect(() => {
     setThemePreference({
       darkMode: storedDarkMode(themeOwnerId),
       ownerId: themeOwnerId
     });
+    setUserSettingsPreference({
+      settings: storedUserSettings(themeOwnerId),
+      ownerId: themeOwnerId
+    });
+    setNotificationPermission(browserNotificationsAvailable() ? Notification.permission : "denied");
   }, [themeOwnerId]);
 
   useEffect(() => {
@@ -535,9 +641,19 @@ export function App() {
   }, [themeOwnerId, themePreference]);
 
   useEffect(() => {
+    if (userSettingsPreference.ownerId !== themeOwnerId) return;
+    window.localStorage.setItem(`${settingsKeyPrefix}${themeOwnerId}`, JSON.stringify(userSettingsPreference.settings));
+    document.documentElement.dataset.compact = userSettingsPreference.settings.compactMode ? "true" : "false";
+    document.documentElement.dataset.reduceMotion = userSettingsPreference.settings.reduceMotion ? "true" : "false";
+  }, [themeOwnerId, userSettingsPreference]);
+
+  useEffect(() => {
     function syncTheme(event: StorageEvent) {
       if (event.key === `${themeKeyPrefix}${themeOwnerId}` && event.newValue) {
         setThemePreference({ darkMode: event.newValue === "dark", ownerId: themeOwnerId });
+      }
+      if (event.key === `${settingsKeyPrefix}${themeOwnerId}` && event.newValue) {
+        setUserSettingsPreference({ settings: storedUserSettings(themeOwnerId), ownerId: themeOwnerId });
       }
     }
 
@@ -560,6 +676,62 @@ export function App() {
       window.localStorage.setItem("mab-task-allocator.language", next);
       return next;
     });
+  }
+
+  function updateUserSettings(partial: Partial<UserSettings>) {
+    setUserSettingsPreference((preference) => ({
+      ownerId: themeOwnerId,
+      settings: {
+        ...(preference.ownerId === themeOwnerId ? preference.settings : storedUserSettings(themeOwnerId)),
+        ...partial
+      }
+    }));
+  }
+
+  async function enableDesktopNotifications() {
+    if (!browserNotificationsAvailable()) {
+      updateUserSettings({ desktopNotifications: false });
+      setNotificationPermission("denied");
+      return;
+    }
+    const permission = Notification.permission === "default"
+      ? await Notification.requestPermission()
+      : Notification.permission;
+    setNotificationPermission(permission);
+    updateUserSettings({ desktopNotifications: permission === "granted" });
+    if (permission === "granted") {
+      new Notification("MAB notifications enabled", {
+        body: "You will receive laptop notifications for new task and chat updates.",
+        icon: mabLogo
+      });
+    }
+  }
+
+  function disableDesktopNotifications() {
+    updateUserSettings({ desktopNotifications: false });
+    setNotificationPermission(browserNotificationsAvailable() ? Notification.permission : "denied");
+  }
+
+  function testNotificationPreferences() {
+    if (userSettings.notificationSound) playNotificationTone(userSettings.notificationVolume);
+    if (desktopNotificationsEnabled) {
+      new Notification("MAB test notification", {
+        body: "Desktop notifications are working for this user.",
+        icon: mabLogo
+      });
+    }
+  }
+
+  function resetLocalSettings() {
+    setUserSettingsPreference({ ownerId: themeOwnerId, settings: defaultSettings });
+    setThemePreference({ ownerId: themeOwnerId, darkMode: false });
+    setLanguage("en");
+    window.localStorage.setItem("mab-task-allocator.language", "en");
+  }
+
+  function goBackInApp() {
+    if (canGoBackInApp) window.history.back();
+    else setActiveView("dashboard");
   }
   const [teamDepartment, setTeamDepartment] = useState("");
   const [teamMonth, setTeamMonth] = useState(new Date().toISOString().slice(0, 7));
@@ -616,6 +788,43 @@ export function App() {
     });
   }
 
+  function announceNewNotifications(incomingNotifications: AppNotification[]) {
+    if (!currentUser) return;
+    const incomingIds = new Set(incomingNotifications.map((notification) => notification.id));
+    if (!notificationHydratedRef.current) {
+      knownNotificationIdsRef.current = incomingIds;
+      notificationHydratedRef.current = true;
+      return;
+    }
+
+    const freshUnreadNotifications = incomingNotifications.filter((notification) => {
+      if (notification.isRead || knownNotificationIdsRef.current.has(notification.id)) return false;
+      const announcedKey = `${announcedNotificationPrefix}${currentUser.id}.${notification.id}`;
+      if (window.localStorage.getItem(announcedKey)) return false;
+      window.localStorage.setItem(announcedKey, "true");
+      return true;
+    });
+    knownNotificationIdsRef.current = incomingIds;
+    if (!freshUnreadNotifications.length) return;
+    if (userSettings.notifyOnlyWhenHidden && document.visibilityState === "visible") return;
+
+    const newestNotification = freshUnreadNotifications[0];
+    if (userSettings.notificationSound) playNotificationTone(userSettings.notificationVolume);
+    if (desktopNotificationsEnabled) {
+      const desktopNotification = new Notification(newestNotification.title, {
+        body: userSettings.notificationPreview ? newestNotification.body : "Open MAB Task Allocator to view the update.",
+        icon: mabLogo,
+        tag: newestNotification.id
+      });
+      desktopNotification.onclick = () => {
+        window.focus();
+        openNotificationTarget(newestNotification);
+        desktopNotification.close();
+      };
+      window.setTimeout(() => desktopNotification.close(), 8000);
+    }
+  }
+
   async function refreshData(silent = false) {
     try {
       const data = await api.bootstrap();
@@ -625,6 +834,7 @@ export function App() {
         candidateNames: task.candidateNames ?? [],
         workerApprovals: task.workerApprovals ?? [],
         pendingApprovalNames: task.pendingApprovalNames ?? [],
+        claimRequests: task.claimRequests ?? (task.claimRequest ? [task.claimRequest] : []),
         files: task.files ?? [],
         messages: task.messages ?? [],
         events: task.events ?? [],
@@ -653,6 +863,7 @@ export function App() {
       setAuditLogs(data.auditLogs ?? []);
       setTodos(data.todos ?? []);
       setProjects((data.projects ?? []).map((project) => ({ ...project, members: project.members ?? [] })));
+      announceNewNotifications(data.notifications ?? []);
       setNotifications(data.notifications ?? []);
       setChatChannels(data.chatChannels ?? []);
       setChatMessages(safeChatMessages);
@@ -684,19 +895,57 @@ export function App() {
 
   useEffect(() => {
     if (!currentUser) return;
+    const currentState = window.history.state;
+    const initialDepth = typeof currentState?.appDepth === "number" ? currentState.appDepth : 0;
+    appNavigationDepthRef.current = initialDepth;
+    window.history.replaceState({ ...(currentState ?? {}), mabApp: true, view: activeView, appDepth: initialDepth }, "", urlForView(activeView));
+    setCanGoBackInApp(initialDepth > 0);
+
+    function handleBrowserBack(event: PopStateEvent) {
+      navigationFromPopRef.current = true;
+      const stateView = typeof event.state?.view === "string" && isAppView(event.state.view) ? event.state.view : viewFromUrl();
+      const depth = typeof event.state?.appDepth === "number" ? event.state.appDepth : 0;
+      appNavigationDepthRef.current = Math.max(0, depth);
+      setCanGoBackInApp(appNavigationDepthRef.current > 0);
+      setActiveView(stateView);
+    }
+
+    window.addEventListener("popstate", handleBrowserBack);
+    return () => window.removeEventListener("popstate", handleBrowserBack);
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    if (navigationFromPopRef.current) {
+      navigationFromPopRef.current = false;
+      return;
+    }
+
+    const currentState = window.history.state;
+    if (currentState?.mabApp && currentState.view === activeView) return;
+    const nextDepth = Math.max(0, appNavigationDepthRef.current + 1);
+    appNavigationDepthRef.current = nextDepth;
+    window.history.pushState({ mabApp: true, view: activeView, appDepth: nextDepth }, "", urlForView(activeView));
+    setCanGoBackInApp(nextDepth > 0);
+  }, [activeView, currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser) return;
     let refreshing = false;
-    const refreshVisibleWorkspace = async () => {
-      if (document.visibilityState !== "visible" || refreshing) return;
+    const refreshWorkspace = async () => {
+      const isHidden = document.visibilityState !== "visible";
+      if (!userSettings.autoRefresh || refreshing) return;
+      if (isHidden && !userSettings.backgroundNotifications) return;
       refreshing = true;
       try { await refreshData(true); } finally { refreshing = false; }
     };
-    const interval = window.setInterval(() => void refreshVisibleWorkspace(), 12_000);
-    document.addEventListener("visibilitychange", refreshVisibleWorkspace);
+    const interval = window.setInterval(() => void refreshWorkspace(), 12_000);
+    document.addEventListener("visibilitychange", refreshWorkspace);
     return () => {
       window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", refreshVisibleWorkspace);
+      document.removeEventListener("visibilitychange", refreshWorkspace);
     };
-  }, [currentUser?.id]);
+  }, [currentUser?.id, userSettings.autoRefresh, userSettings.backgroundNotifications]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -1132,6 +1381,8 @@ export function App() {
       setTodos([]);
       setProjects([]);
       setNotifications([]);
+      knownNotificationIdsRef.current = new Set();
+      notificationHydratedRef.current = false;
       setChatChannels([]);
       setChatMessages([]);
     }
@@ -1150,6 +1401,8 @@ export function App() {
       setTodos([]);
       setProjects([]);
       setNotifications([]);
+      knownNotificationIdsRef.current = new Set();
+      notificationHydratedRef.current = false;
       setChatChannels([]);
       setChatMessages([]);
       setLoginError("Your session expired after 10 minutes of inactivity. Please log in again.");
@@ -1601,11 +1854,21 @@ export function App() {
     );
   }
 
-  async function reviewTaskClaim(task: ManagedTask, approve: boolean) {
+  function toggleClaimSelection(taskId: string, userId: string) {
+    setClaimSelection((selection) => {
+      const selected = new Set(selection[taskId] ?? []);
+      if (selected.has(userId)) selected.delete(userId);
+      else selected.add(userId);
+      return { ...selection, [taskId]: Array.from(selected) };
+    });
+  }
+
+  async function reviewTaskClaim(task: ManagedTask, approve: boolean, userIds: string[] = []) {
     try {
-      await api.taskAction(task.id, approve ? "claim-approve" : "claim-reject");
+      await api.taskAction(task.id, approve ? "claim-approve" : "claim-reject", approve ? { userIds } : { userId: userIds[0] });
       await refreshData(true);
-      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: approve ? "Claim approved. The task start was recorded." : "Claim request declined." }));
+      setClaimSelection((selection) => ({ ...selection, [task.id]: [] }));
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: approve ? "Claim request approved. The task start was recorded." : "Claim request declined." }));
     } catch (error) {
       setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: error instanceof Error ? error.message : "Could not review this request." }));
     }
@@ -1665,6 +1928,11 @@ export function App() {
 
   async function addTaskMessage(task: ManagedTask) {
     if (!currentUser) return;
+    const canCollaborate = currentUser.role !== "user" || task.assigneeIds.includes(currentUser.id);
+    if (!canCollaborate) {
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: "Take or be assigned to this task before adding comments." }));
+      return;
+    }
 
     const body = messageDrafts[task.id]?.trim();
     if (!body) return;
@@ -1678,34 +1946,13 @@ export function App() {
     }
   }
 
-  async function saveTaskMessage(task: ManagedTask, messageId: string) {
-    const body = taskMessageEditDraft.trim();
-    if (!body) return;
-    try {
-      const result = await api.updateTaskMessage(task.id, messageId, body);
-      setTasks((currentTasks) => currentTasks.map((item) => item.id === result.task.id ? result.task : item));
-      setEditingTaskMessageId("");
-      setTaskMessageEditDraft("");
-      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: "Comment updated." }));
-    } catch (error) {
-      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: error instanceof Error ? error.message : "Could not edit this comment." }));
-    }
-  }
-
-  function deleteTaskMessage(task: ManagedTask, messageId: string) {
-    requestConfirmation("Delete this task comment? This cannot be undone.", async () => {
-      try {
-        const result = await api.deleteTaskMessage(task.id, messageId);
-        setTasks((currentTasks) => currentTasks.map((item) => item.id === result.task.id ? result.task : item));
-        setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: "Comment deleted." }));
-      } catch (error) {
-        setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: error instanceof Error ? error.message : "Could not delete this comment." }));
-      }
-    });
-  }
-
   async function addTaskFiles(task: ManagedTask, fileList: FileList | null) {
     if (!currentUser || !fileList?.length) return;
+    const canCollaborate = currentUser.role !== "user" || task.assigneeIds.includes(currentUser.id);
+    if (!canCollaborate) {
+      setTaskMessageStatus((statuses) => ({ ...statuses, [task.id]: "Take or be assigned to this task before attaching documents." }));
+      return;
+    }
 
     const files = Array.from(fileList);
     try {
@@ -1944,20 +2191,161 @@ export function App() {
     });
   }
 
+  function renderTaskChatter(task: ManagedTask, mode: "active" | "archive" = "active") {
+    const chatterItems = [
+      ...task.events.map((event, index) => ({
+        id: `event-${event.id}`,
+        kind: "event" as const,
+        actorId: event.actorId,
+        actorName: event.actorName,
+        createdAt: event.createdAt,
+        sort: Date.parse(event.createdAtIso ?? event.createdAt) || index,
+        event
+      })),
+      ...task.messages.map((message, index) => ({
+        id: `message-${message.id}`,
+        kind: "message" as const,
+        actorId: message.authorId,
+        actorName: message.authorName,
+        createdAt: message.createdAt,
+        sort: Date.parse(message.createdAt) || 10_000 + index,
+        message
+      }))
+    ].sort((first, second) => second.sort - first.sort);
+    const readOnly = task.status === "done";
+    const canCollaborate = Boolean(currentUser && (currentUser.role !== "user" || task.assigneeIds.includes(currentUser.id)));
+    const collaborationLocked = mode === "active" && !readOnly && !canCollaborate;
+
+    return (
+      <section className={`workflow-chatter ${mode === "archive" ? "archive-chatter" : ""}`} aria-label={`Workflow updates for ${task.taskCode}`}>
+        <header className="task-chatter-header">
+          <div>
+            <MessageSquare aria-hidden="true" size={17} />
+            <span><strong>Workflow updates</strong><small>{task.events.length} updates · {task.messages.length} comments · {task.files.length} attachments</small></span>
+          </div>
+          {readOnly ? <span className="chatter-lock"><Lock aria-hidden="true" size={13} />Read-only</span> : null}
+        </header>
+
+        <div className="workflow-chatter-meta">
+          <span>{task.events.length} updates</span>
+          <span>{task.messages.length} comments</span>
+          <span>{task.files.length} attachments</span>
+          {readOnly ? <span><Lock aria-hidden="true" size={12} />Read-only</span> : null}
+        </div>
+
+        <div className="workflow-files-area">
+          <div className="workflow-files-title">
+            <span />
+            <strong>Files</strong>
+            <span />
+          </div>
+          <div className="workflow-files-content">
+            {task.files.length ? (
+              <div className="workflow-file-list">
+                {[...task.files].reverse().map((file) => (
+                  <button className="workflow-file-card" onClick={() => downloadTaskFile(file)} type="button" key={file.id}>
+                    <Paperclip aria-hidden="true" size={13} />
+                    <span><b>{file.name}</b><small>{formatFileSize(file.size)} · {file.uploadedBy}</small></span>
+                    <Download aria-hidden="true" size={13} />
+                  </button>
+                ))}
+              </div>
+            ) : <small className="workflow-files-empty">No files attached yet.</small>}
+            {mode === "active" && !readOnly && canCollaborate ? (
+              <label className="file-upload chatter-upload workflow-attach-action">
+                <Paperclip aria-hidden="true" size={13} />
+                Attach files
+                <input
+                  multiple
+                  onChange={(event) => {
+                    addTaskFiles(task, event.target.files);
+                    event.target.value = "";
+                  }}
+                  type="file"
+                />
+              </label>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="chatter-feed">
+          {chatterItems.length ? chatterItems.map((item) => {
+            const mine = item.actorId === currentUser?.id;
+            const color = identityColor(item.actorId ?? item.actorName, currentUser?.id);
+            return (
+              <article className={`chatter-item chatter-${item.kind} ${mine ? "mine" : ""}`} key={item.id}>
+                <span className="chatter-avatar" style={{ background: color }}>{initials(item.actorName)}</span>
+                <div className="chatter-line">
+                  <div className="chatter-meta">
+                    <strong style={{ color }}>{item.actorName}</strong>
+                    <small>{item.createdAt}</small>
+                  </div>
+                  {item.kind === "event" ? (
+                    <p><b>{taskEventLabels[item.event.type] ?? item.event.type}</b> {item.event.details}</p>
+                  ) : item.kind === "message" ? (
+                    <p>{item.message.body}</p>
+                  ) : null}
+                </div>
+              </article>
+            );
+          }) : <p className="empty-state">No chatter yet. Add the first update.</p>}
+        </div>
+
+        {mode === "active" ? (
+          <div className="chatter-composer">
+            {readOnly ? (
+              <small className="locked-note"><Lock aria-hidden="true" size={13} />Approved task: comments are read-only and documents are download-only.</small>
+            ) : collaborationLocked ? (
+              <small className="locked-note"><Lock aria-hidden="true" size={13} />Take or be assigned to this task before adding comments or attachments.</small>
+            ) : (
+              <>
+                <div className="chatter-composer-main">
+                  <span className="chatter-avatar" style={{ background: identityColor(currentUser?.id, currentUser?.id) }}>{initials(currentUser?.name ?? "?")}</span>
+                  <input
+                    className={messageDrafts[task.id] ? "typing-input" : ""}
+                    maxLength={2000}
+                    onChange={(event) => setMessageDrafts((drafts) => ({ ...drafts, [task.id]: event.target.value }))}
+                    placeholder="Write a comment or update..."
+                    value={messageDrafts[task.id] ?? ""}
+                  />
+                  <button type="button" className="task-action-button" onClick={() => addTaskMessage(task)}>
+                    <MessageSquare aria-hidden="true" size={15} />
+                    Add comment
+                  </button>
+                </div>
+                <div className="chatter-tools">
+                  <div className="emoji-picker workflow-emoji-picker" aria-label="Quick emojis">
+                    {quickEmojis.map((emoji) => (
+                      <button className="workflow-emoji-button" key={emoji} type="button" onClick={() => setMessageDrafts((drafts) => ({ ...drafts, [task.id]: `${drafts[task.id] ?? ""}${emoji}` }))} aria-label={`Add ${emoji}`}>{emoji}</button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+            {taskMessageStatus[task.id] ? <p className="conversation-status">{taskMessageStatus[task.id]}</p> : null}
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
   function renderTaskCard(task: ManagedTask, view: "department" | "mine" = "department") {
     const isEditingTask = editingTaskId === task.id && taskEditDraft;
     const isAssigningTask = assigningTaskId === task.id;
     const canDeleteTask = canManageTask(task);
     const canEditTask = canDeleteTask && task.status !== "done";
+    const claimRequests = task.claimRequests ?? (task.claimRequest ? [task.claimRequest] : []);
+    const userHasClaimRequest = Boolean(currentUser && claimRequests.some((request) => request.userId === currentUser.id));
+    const selectedClaimIds = claimSelection[task.id] ?? [];
     const canClaimTask =
       currentUser?.role === "user" &&
       task.department === currentUser.department &&
       !task.assigneeIds.length &&
-      !task.claimRequest &&
+      !userHasClaimRequest &&
       task.status === "new";
-    const hasPendingClaim = Boolean(task.claimRequest && !task.assigneeIds.length);
+    const hasPendingClaim = Boolean(claimRequests.length && !task.assigneeIds.length);
     const canReviewClaim = Boolean(hasPendingClaim && currentUser && ["admin", "superadmin"].includes(currentUser.role));
-    const canDirectAssign = Boolean(canEditTask && !task.assigneeIds.length && !task.claimRequest);
+    const canDirectAssign = Boolean(canEditTask && !task.assigneeIds.length && !claimRequests.length);
     const canSubmitForReview =
       currentUser?.role === "user" &&
       task.assigneeIds.includes(currentUser.id) &&
@@ -1972,9 +2360,31 @@ export function App() {
       : sameDepartment(user.department, taskEditDraft?.department ?? task.department));
     const overdue = isTaskOverdue(task);
     const taskInsight = intelligence.taskInsights.find((insight) => insight.taskId === task.id);
+    const workflowStatusText = task.status === "done"
+      ? "Completed and locked"
+      : task.status === "under_review"
+        ? "Waiting for admin approval"
+        : task.pendingApprovalNames.length
+          ? `Waiting for ${task.pendingApprovalNames.join(", ")}`
+          : task.assigneeIds.length
+            ? "Work in progress"
+            : claimRequests.length
+              ? "Claim request pending"
+              : "Ready to assign";
 
     return (
-      <article className={`task-card task-card-priority-${task.priority}`} id={`task-${task.id}`} key={`${view}-${task.id}`}>
+      <details className={`task-card active-task-card task-card-priority-${task.priority}`} id={`task-${task.id}`} key={`${view}-${task.id}`}>
+        <summary className="active-task-summary">
+          <span className="archive-check"><ClipboardList aria-hidden="true" size={17} /></span>
+          <span className="archive-task-name">
+            <strong>{task.title}</strong>
+            <small>Task #{task.taskCode}{task.projectName ? ` · ${task.projectName}` : ""}</small>
+          </span>
+          <span className={`status-pill status-${task.status}`}>{statusLabels[task.status]}</span>
+          <span className={`priority priority-${task.priority}`}>{priorityLabels[task.priority]}</span>
+          <span className="archive-owner">{task.candidateName || "Unassigned"}</span>
+          <span className="archive-completed"><small>Progress</small><strong>{task.progress}%</strong></span>
+        </summary>
         <div className="task-row">
           {isEditingTask ? (
             <div className="edit-task-panel">
@@ -2228,25 +2638,34 @@ export function App() {
                   )}
                 </div>
               </div>
+              <div className={`task-workflow-summary workflow-status-${task.status}`}>
+                <div className="workflow-summary-head">
+                  <span><RotateCcw aria-hidden="true" size={15} />Workflow</span>
+                  <strong>{workflowStatusText}</strong>
+                </div>
+                {task.workerApprovals.length || task.pendingApprovalNames.length || canSubmitForReview ? (
+                  <div className="workflow-approval-strip">
+                    {task.workerApprovals.length ? <span className="approved"><CheckCircle2 aria-hidden="true" size={13} />Approved: {task.workerApprovals.map((approval) => approval.name).join(", ")}</span> : null}
+                    {task.pendingApprovalNames.length ? <span className="waiting"><AlertTriangle aria-hidden="true" size={13} />Waiting: {task.pendingApprovalNames.join(", ")}</span> : null}
+                    {canSubmitForReview ? (
+                      <button type="button" className="task-action-button workflow-finish-button" onClick={() => confirmFinishTask(task)}>
+                        <CheckCircle2 aria-hidden="true" size={15} />
+                        Finish Task
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+                {renderTaskChatter(task)}
+              </div>
             </div>
           )}
 
-          {(canEditTask || canDeleteTask || canClaimTask || canSubmitForReview || canReviewClaim) && !isEditingTask && !isAssigningTask ? (
+          {(canEditTask || canDeleteTask || canClaimTask) && !isEditingTask && !isAssigningTask ? (
             <div className="row-actions task-actions">
               {canClaimTask ? (
                 <button type="button" className="task-action-button" onClick={() => confirmTaskClaim(task)}>
                   <Hand aria-hidden="true" size={16} />
                   Request to Take
-                </button>
-              ) : null}
-              {canReviewClaim ? <>
-                <button type="button" className="task-action-button" onClick={() => reviewTaskClaim(task, true)}><CheckCircle2 aria-hidden="true" size={16} />Approve Claim</button>
-                <button type="button" className="task-action-button secondary" onClick={() => reviewTaskClaim(task, false)}><X aria-hidden="true" size={16} />Reject</button>
-              </> : null}
-              {canSubmitForReview ? (
-                <button type="button" className="task-action-button" onClick={() => confirmFinishTask(task)}>
-                  <CheckCircle2 aria-hidden="true" size={16} />
-                  Finish Task
                 </button>
               ) : null}
               {canEditTask ? (
@@ -2264,23 +2683,44 @@ export function App() {
           ) : null}
         </div>
 
-        {task.claimRequest ? (
+        {claimRequests.length ? (
           <div className={`claim-request-note ${canReviewClaim ? "manager" : ""}`}>
             <Hand aria-hidden="true" size={17} />
-            <div><strong>{task.claimRequest.userId === currentUser?.id ? "Your request is waiting for approval" : `${task.claimRequest.userName} requested this task`}</strong><span>The task has not started. Complexity and scheduling remain separate manager decisions.</span></div>
+            {canReviewClaim ? (
+              <div className="claim-request-panel">
+                <strong>{claimRequests.length} request{claimRequests.length === 1 ? "" : "s"} to take this free task</strong>
+                <div className="claim-request-list">
+                  {claimRequests.map((request) => (
+                    <label className="claim-request-item" key={request.userId}>
+                      <input
+                        checked={selectedClaimIds.includes(request.userId)}
+                        onChange={() => toggleClaimSelection(task.id, request.userId)}
+                        type="checkbox"
+                      />
+                      <span><b>{request.userName}</b><small>{request.requestedAt ? `Requested ${new Date(request.requestedAt).toLocaleString("en-GB")}` : "Request pending"}</small></span>
+                      <button className="ghost-button" onClick={(event) => { event.preventDefault(); void reviewTaskClaim(task, false, [request.userId]); }} type="button">
+                        Reject
+                      </button>
+                    </label>
+                  ))}
+                </div>
+                <div className="claim-request-actions">
+                  <button className="task-action-button" disabled={!selectedClaimIds.length} onClick={() => reviewTaskClaim(task, true, selectedClaimIds)} type="button">
+                    <CheckCircle2 aria-hidden="true" size={15} />Approve selected
+                  </button>
+                  <button className="task-action-button secondary" onClick={() => reviewTaskClaim(task, true, claimRequests.map((request) => request.userId))} type="button">
+                    <Users aria-hidden="true" size={15} />Approve all
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div><strong>{userHasClaimRequest ? "Your request is waiting for approval" : `${claimRequests.length} user${claimRequests.length === 1 ? "" : "s"} requested this task`}</strong><span>The task has not started. An admin can approve one or more requesters.</span></div>
+            )}
           </div>
         ) : null}
 
         {task.status === "under_review" && currentUser && task.assigneeIds.includes(currentUser.id) ? (
           <p className="review-note">All assigned workers approved. Waiting for admin approval.</p>
-        ) : null}
-
-        {task.status !== "done" && task.status !== "under_review" && task.workerApprovals.length ? (
-          <p className="worker-approval-note">
-            {currentUser && task.workerApprovals.some((approval) => approval.id === currentUser.id)
-              ? `You approved this task. Waiting for ${task.pendingApprovalNames.join(", ")}.`
-              : `${task.workerApprovals.map((approval) => approval.name).join(", ")} approved. Waiting for ${task.pendingApprovalNames.join(", ")}.`}
-          </p>
         ) : null}
 
         {task.status === "done" ? (
@@ -2291,20 +2731,6 @@ export function App() {
               <span>{task.completedAt ? `Completed ${task.completedAt}` : "Completion recorded"}</span>
             </div>
           </div>
-        ) : null}
-
-        {task.events.length ? (
-          <details className="task-workflow">
-            <summary><span><RotateCcw aria-hidden="true" size={15} />Workflow & updates</span><b>{task.events.length} events</b></summary>
-            <div className="task-workflow-list">
-              {[...task.events].reverse().map((event) => (
-                <article className={`task-workflow-event event-${event.type}`} key={event.id}>
-                  <span className="workflow-dot"><CheckCircle2 aria-hidden="true" size={13} /></span>
-                  <div><strong>{taskEventLabels[event.type] ?? event.type}</strong><p>{event.details}</p><small>{event.actorName} · {event.createdAt}</small></div>
-                </article>
-              ))}
-            </div>
-          </details>
         ) : null}
 
         {canReviewTask || canReopenCompletedTask ? (
@@ -2327,117 +2753,7 @@ export function App() {
           </div>
         ) : null}
 
-        <details className="task-collaboration-details" onToggle={(event) => { if (event.currentTarget.open) void api.trackTaskView(task.id).catch(() => undefined); }}>
-          <summary><span><MessageSquare aria-hidden="true" size={15} />Discussion <b>{task.messages.length}</b></span><span><Paperclip aria-hidden="true" size={15} />Documents <b>{task.files.length}</b></span><small>Open workspace</small></summary>
-        <div className="task-collab">
-          <div className="task-thread">
-            <div className="collab-heading">
-              <MessageSquare aria-hidden="true" size={16} />
-              <strong>Task Chat</strong>
-            </div>
-            <div className="task-message-list" tabIndex={0} aria-label={`Comments for Task ${task.taskCode}`}>
-              {task.messages.length ? task.messages.map((message) => {
-                  const mine = message.authorId === currentUser?.id;
-                  return (
-                    <article className={`task-comment ${mine ? "mine" : ""}`} key={message.id}>
-                      <span className="task-comment-avatar" style={{ background: identityColor(message.authorId, currentUser?.id) }}>
-                        {initials(message.authorName)}
-                      </span>
-                      <div className="task-comment-bubble">
-                        <div className="message-heading">
-                          <strong style={{ color: identityColor(message.authorId, currentUser?.id) }}>{message.authorName}</strong>
-                          <span>{message.createdAt}</span>
-                        </div>
-                        {editingTaskMessageId === message.id ? (
-                          <div className="message-edit-form">
-                            <input
-                              autoFocus
-                              maxLength={2000}
-                              onChange={(event) => setTaskMessageEditDraft(event.target.value)}
-                              value={taskMessageEditDraft}
-                            />
-                            <button className="icon-button" onClick={() => saveTaskMessage(task, message.id)} type="button" aria-label="Save comment"><Save aria-hidden="true" size={15} /></button>
-                            <button className="icon-button" onClick={() => { setEditingTaskMessageId(""); setTaskMessageEditDraft(""); }} type="button" aria-label="Cancel editing"><X aria-hidden="true" size={15} /></button>
-                          </div>
-                        ) : <p>{message.body}</p>}
-                        {mine && editingTaskMessageId !== message.id ? (
-                          <div className="message-actions">
-                            <button onClick={() => { setEditingTaskMessageId(message.id); setTaskMessageEditDraft(message.body); }} type="button"><Edit3 aria-hidden="true" size={13} />Edit</button>
-                            <button className="danger" onClick={() => deleteTaskMessage(task, message.id)} type="button"><Trash2 aria-hidden="true" size={13} />Delete</button>
-                          </div>
-                        ) : null}
-                      </div>
-                    </article>
-                  );
-                }) : <p className="empty-state">No comments yet. Start the discussion.</p>}
-            </div>
-            {taskMessageStatus[task.id] ? <p className="conversation-status">{taskMessageStatus[task.id]}</p> : null}
-            {task.status !== "done" ? (
-              <>
-                <div className="emoji-picker" aria-label="Quick emojis">
-                  {quickEmojis.map((emoji) => (
-                    <button key={emoji} type="button" onClick={() => setMessageDrafts((drafts) => ({ ...drafts, [task.id]: `${drafts[task.id] ?? ""}${emoji}` }))} aria-label={`Add ${emoji}`}>{emoji}</button>
-                  ))}
-                </div>
-                <div className="chat-form">
-                  <input
-                    className={messageDrafts[task.id] ? "typing-input" : ""}
-                    onChange={(event) =>
-                      setMessageDrafts((drafts) => ({ ...drafts, [task.id]: event.target.value }))
-                    }
-                    placeholder="Add a comment"
-                    value={messageDrafts[task.id] ?? ""}
-                  />
-                  <button type="button" className="icon-button" onClick={() => addTaskMessage(task)} aria-label="Send comment">
-                    <Plus aria-hidden="true" size={16} />
-                  </button>
-                </div>
-              </>
-            ) : <small className="locked-note">Approved task: comments are read-only.</small>}
-          </div>
-
-          <div className="task-files">
-            <div className="collab-heading">
-              <Paperclip aria-hidden="true" size={16} />
-              <strong>Task Documents</strong>
-            </div>
-            {task.files.length ? (
-              task.files.map((file) => (
-                <button
-                  className="file-download"
-                  key={file.id}
-                  onClick={() => downloadTaskFile(file)}
-                  title={`Download ${file.name}`}
-                  type="button"
-                >
-                  <span>
-                    <strong>{file.name}</strong>
-                    <small>{file.uploadedBy} - {file.uploadedAt} - {formatFileSize(file.size)}</small>
-                  </span>
-                  <Download aria-hidden="true" size={16} />
-                </button>
-              ))
-            ) : (
-              <p>No files added.</p>
-            )}
-            {task.status !== "done" ? (
-              <label className="file-upload">
-                <Paperclip aria-hidden="true" size={16} />
-                Add Files
-                <input
-                  multiple
-                  onChange={(event) => {
-                    addTaskFiles(task, event.target.files);
-                    event.target.value = "";
-                  }}
-                  type="file"
-                />
-              </label>
-            ) : <small className="locked-note">Approved task: documents are download-only.</small>}
-          </div>
-        </div>
-        </details>
-      </article>
+      </details>
     );
   }
 
@@ -2931,6 +3247,14 @@ export function App() {
               <button type="button" className={`sidebar-nav-button ${activeView === "audit" ? "active" : ""}`} onClick={() => setActiveView("audit")}><ShieldCheck aria-hidden="true" size={17} />Admin Audit</button>
             </>
           ) : null}
+          <button
+            type="button"
+            className={`sidebar-nav-button ${activeView === "settings" ? "active" : ""}`}
+            onClick={() => setActiveView("settings")}
+          >
+            <Settings aria-hidden="true" size={17} />
+            Settings
+          </button>
         </nav>
         <div className="sidebar-user">
           <span className="user-avatar" aria-hidden="true">
@@ -2947,6 +3271,12 @@ export function App() {
       <section className="workspace">
         <header className="topbar">
           <div className="topbar-title">
+            {canGoBackInApp || activeView !== "dashboard" ? (
+              <button className="app-back-button" onClick={goBackInApp} type="button" aria-label="Go back">
+                <CornerUpLeft aria-hidden="true" size={17} />
+                <span>Back</span>
+              </button>
+            ) : null}
             <img src={mabLogo} alt="" aria-hidden="true" />
             <div>
               <p>{currentUser.department} / {viewTitles[activeView]}</p>
@@ -3814,7 +4144,185 @@ export function App() {
             </div>
             <details className="intelligence-method"><summary>How these signals are calculated</summary><p><strong>Delay risk</strong> combines deadline proximity, progress versus comparable completed work, assignee load, blocked state, and reopen cycles. <strong>Smart priority</strong> combines declared urgency, deadline pressure, complexity, blocked/review state, and quality history. <strong>Burnout risk</strong> combines active complexity, concurrent tasks, urgent and overdue work, blockers, and rework. Scores are capped, explainable, and advisory.</p></details>
           </section>;
-        })() : activeView === "attendance" ? (() => {
+        })() : activeView === "settings" ? (
+          <section className="panel settings-page">
+            <header className="settings-hero">
+              <div>
+                <span><Settings aria-hidden="true" size={22} /></span>
+                <div>
+                  <p>Personal workspace preferences</p>
+                  <h2>Settings</h2>
+                  <small>These options are saved for {currentUser.name} only on this browser.</small>
+                </div>
+              </div>
+              <div className="settings-hero-actions">
+                <button className="ghost-button settings-hero-button" onClick={testNotificationPreferences} type="button">
+                  {userSettings.notificationSound ? <Volume2 aria-hidden="true" size={16} /> : <VolumeX aria-hidden="true" size={16} />}
+                  Test alert
+                </button>
+              </div>
+            </header>
+
+            <div className="settings-status-row">
+              <span><strong>{roleLabels[currentUser.role]}</strong><small>Current role</small></span>
+              <span><strong>{currentUser.department}</strong><small>Department scope</small></span>
+              <span><strong>{desktopNotificationsEnabled ? "On" : notificationPermission === "denied" ? "Blocked" : "Off"}</strong><small>Desktop notifications</small></span>
+              <span><strong>{userSettings.autoRefresh ? userSettings.backgroundNotifications ? "Live + background" : "Live" : "Manual"}</strong><small>Workspace refresh</small></span>
+            </div>
+
+            <div className="settings-grid">
+              <section className="settings-card settings-card-large">
+                <div>
+                  <p>Notifications</p>
+                  <h3>Laptop alerts</h3>
+                  <small>Show a desktop notification when a new task, chat, approval, or project update arrives for you.</small>
+                </div>
+                <div className="settings-stack">
+                  <label className="setting-switch">
+                    <span>
+                      <strong>Desktop notifications</strong>
+                      <small>
+                        {!desktopNotificationsSupported
+                          ? "This browser does not support desktop notifications."
+                          : notificationPermission === "denied"
+                            ? "Blocked in browser settings. Allow notifications for localhost to use this."
+                            : desktopNotificationsEnabled
+                              ? "Enabled for this user."
+                              : "Ask the browser for permission before enabling."}
+                      </small>
+                    </span>
+                    <input
+                      checked={desktopNotificationsEnabled}
+                      disabled={!desktopNotificationsSupported || notificationPermission === "denied"}
+                      onChange={(event) => event.target.checked ? void enableDesktopNotifications() : disableDesktopNotifications()}
+                      type="checkbox"
+                    />
+                  </label>
+                  {desktopNotificationsSupported && notificationPermission === "default" ? (
+                    <button className="primary-button settings-inline-button" onClick={() => void enableDesktopNotifications()} type="button">Allow browser notifications</button>
+                  ) : null}
+                  <label className="setting-switch">
+                    <span>
+                      <strong>Notification sound</strong>
+                      <small>Play a short tone when a new unread notification arrives.</small>
+                    </span>
+                    <input checked={userSettings.notificationSound} onChange={(event) => updateUserSettings({ notificationSound: event.target.checked })} type="checkbox" />
+                  </label>
+                  <label className="setting-range">
+                    <span><strong>Sound volume</strong><small>{userSettings.notificationVolume}%</small></span>
+                    <input
+                      disabled={!userSettings.notificationSound}
+                      max="100"
+                      min="5"
+                      onChange={(event) => updateUserSettings({ notificationVolume: Number(event.target.value) })}
+                      type="range"
+                      value={userSettings.notificationVolume}
+                    />
+                  </label>
+                  <label className="setting-switch">
+                    <span>
+                      <strong>Alert only when tab is hidden</strong>
+                      <small>Best if you do not want sounds while you are actively using the app.</small>
+                    </span>
+                    <input checked={userSettings.notifyOnlyWhenHidden} onChange={(event) => updateUserSettings({ notifyOnlyWhenHidden: event.target.checked })} type="checkbox" />
+                  </label>
+                  <label className="setting-switch">
+                    <span>
+                      <strong>Background notification checks</strong>
+                      <small>Keep checking for new notifications while this tab is open in the background.</small>
+                    </span>
+                    <input checked={userSettings.backgroundNotifications} onChange={(event) => updateUserSettings({ backgroundNotifications: event.target.checked })} type="checkbox" />
+                  </label>
+                  <label className="setting-switch">
+                    <span>
+                      <strong>Show message preview</strong>
+                      <small>Turn this off on shared laptops to hide notification details.</small>
+                    </span>
+                    <input checked={userSettings.notificationPreview} onChange={(event) => updateUserSettings({ notificationPreview: event.target.checked })} type="checkbox" />
+                  </label>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div>
+                  <p>Appearance</p>
+                  <h3>Display</h3>
+                  <small>Keep the app comfortable for long daily use.</small>
+                </div>
+                <div className="settings-stack">
+                  <label className="setting-switch">
+                    <span><strong>Dark mode</strong><small>Saved per user, so other logged-in users keep their own theme.</small></span>
+                    <input checked={darkMode} onChange={toggleTheme} type="checkbox" />
+                  </label>
+                  <label className="setting-switch">
+                    <span><strong>Compact mode</strong><small>Reduce spacing in dense lists and tables.</small></span>
+                    <input checked={userSettings.compactMode} onChange={(event) => updateUserSettings({ compactMode: event.target.checked })} type="checkbox" />
+                  </label>
+                  <label className="setting-switch">
+                    <span><strong>Reduce motion</strong><small>Minimize animations and smooth scrolling for comfort.</small></span>
+                    <input checked={userSettings.reduceMotion} onChange={(event) => updateUserSettings({ reduceMotion: event.target.checked })} type="checkbox" />
+                  </label>
+                  <button className="ghost-button settings-inline-button" onClick={toggleLanguage} type="button">
+                    <Languages aria-hidden="true" size={16} />
+                    Switch to {language === "en" ? "Arabic" : "English"}
+                  </button>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div>
+                  <p>Workflow</p>
+                  <h3>Workspace behavior</h3>
+                  <small>Control how much the app updates in the background while you work.</small>
+                </div>
+                <div className="settings-stack">
+                  <label className="setting-switch">
+                    <span>
+                      <strong>Live auto-refresh</strong>
+                      <small>Refresh visible task, chat, and notification data every few seconds.</small>
+                    </span>
+                    <input checked={userSettings.autoRefresh} onChange={(event) => updateUserSettings({ autoRefresh: event.target.checked })} type="checkbox" />
+                  </label>
+                  <button className="ghost-button settings-inline-button" onClick={() => void refreshData()} type="button">
+                    Refresh workspace now
+                  </button>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div>
+                  <p>Security</p>
+                  <h3>Session & privacy</h3>
+                  <small>Useful defaults for shared office laptops and duplicated tabs.</small>
+                </div>
+                <div className="settings-facts">
+                  <span><strong>Auto logout</strong><small>After 10 minutes without activity</small></span>
+                  <span><strong>Session storage</strong><small>Each browser tab has its own login session</small></span>
+                  <span><strong>Saved locally</strong><small>Settings stay on this browser, not every employee device</small></span>
+                </div>
+              </section>
+
+              <section className="settings-card danger-zone settings-card-large">
+                <div>
+                  <p>Reset</p>
+                  <h3>Local preferences</h3>
+                  <small>Reset this user’s browser preferences. This does not delete tasks, chats, or documents.</small>
+                </div>
+                <button
+                  className="danger-button"
+                  onClick={() => requestConfirmation(
+                    "Are you sure you want to reset your local settings on this browser?",
+                    resetLocalSettings,
+                    { title: "Reset settings", confirmLabel: "Reset settings", danger: true }
+                  )}
+                  type="button"
+                >
+                  Reset my local settings
+                </button>
+              </section>
+            </div>
+          </section>
+        ) : activeView === "attendance" ? (() => {
           const candidates = currentUser.role === "user"
             ? users.filter((user) => user.id === currentUser.id)
             : productivityCandidates;
@@ -4015,8 +4523,7 @@ export function App() {
                     <div><span>Started</span><strong>{task.startedAt ? new Date(task.startedAt).toLocaleDateString("en-GB") : "Not recorded"}</strong></div>
                   </div>
                   {task.reviewComment ? <p className="archive-review-note"><strong>Final review</strong>{task.reviewComment}</p> : null}
-                  {task.events.length ? <div className="archive-workflow"><strong>Workflow history</strong>{[...task.events].reverse().map((event) => <span key={`archive-event-${event.id}`}><i /><span><b>{taskEventLabels[event.type] ?? event.type}</b><small>{event.actorName} · {event.createdAt}</small></span></span>)}</div> : null}
-                  {task.files.length ? <div className="archive-files">{task.files.map((file) => <button className="file-download" key={file.id} onClick={() => downloadTaskFile(file)} type="button"><span><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span><Download aria-hidden="true" size={15} /></button>)}</div> : null}
+                  {renderTaskChatter(task, "archive")}
                   {canManageTask(task) ? <div className="archive-reopen"><input value={reviewDrafts[task.id] ?? ""} onChange={(event) => setReviewDrafts((drafts) => ({ ...drafts, [task.id]: event.target.value }))} placeholder="Explain why this completed task must be reopened" /><button className="task-action-button secondary" onClick={() => reopenTask(task)} type="button"><RotateCcw aria-hidden="true" size={15} />Reopen Completed Task</button></div> : null}
                 </details>
               )) : <div className="archive-empty"><Search aria-hidden="true" size={24} /><strong>No finished tasks found</strong><span>Try a shorter task ID or clear the additional filters.</span></div>}

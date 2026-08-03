@@ -251,6 +251,12 @@ async function serializeTask(row) {
   const claimRequester = row.claim_requested_by_id
     ? await db.prepare("SELECT id, name FROM users WHERE id = ? AND role = 'user'").get(row.claim_requested_by_id)
     : null;
+  const claimRequests = await db.prepare(`
+    SELECT users.id, users.name, task_claim_requests.requested_at
+    FROM task_claim_requests JOIN users ON users.id = task_claim_requests.user_id
+    WHERE task_claim_requests.task_id = ? AND users.role = 'user'
+    ORDER BY task_claim_requests.requested_at ASC
+  `).all(row.id);
   const files = (await db.prepare(`
     SELECT id, name, uploaded_by, uploaded_at, mime_type, size FROM task_files
     WHERE task_id = ? ORDER BY uploaded_at ASC
@@ -281,6 +287,11 @@ async function serializeTask(row) {
       userName: claimRequester.name,
       requestedAt: isoDateTime(row.claim_requested_at)
     } : undefined,
+    claimRequests: claimRequests.map((request) => ({
+      userId: request.id,
+      userName: request.name,
+      requestedAt: isoDateTime(request.requested_at)
+    })),
     projectId: row.project_id ?? undefined,
     projectName: row.project_name ?? undefined,
     taskType: row.task_type ?? "Technical",
@@ -659,6 +670,42 @@ async function resolveChatChannel(actor, channelId) {
   throw error;
 }
 
+async function chatNotificationContext(channelId, department) {
+  const departmentChatName = String(department ?? "")
+    .replace(/\s+office engineer$/i, "")
+    .trim() || department;
+  if (channelId.startsWith("department:")) {
+    return {
+      title: `${departmentChatName} Department chat`,
+      taskId: null
+    };
+  }
+  if (channelId.startsWith("group:")) {
+    const group = await db.prepare("SELECT name, task_id FROM chat_groups WHERE id = ?").get(channelId.slice("group:".length));
+    return {
+      title: group?.name ? `${group.name} group chat` : `${department} group chat`,
+      taskId: group?.task_id ?? null
+    };
+  }
+  if (channelId.startsWith("dm:")) {
+    return {
+      title: "Direct message",
+      taskId: null
+    };
+  }
+  return {
+    title: `${department} chat`,
+    taskId: null
+  };
+}
+
+function chatMessagePreview(messageBody, fileCount) {
+  const normalized = String(messageBody ?? "").replace(/\s+/g, " ").trim();
+  if (normalized) return normalized.slice(0, 180);
+  if (fileCount) return `${fileCount} attachment${fileCount === 1 ? "" : "s"}`;
+  return "New message";
+}
+
 async function chatDataFor(actor) {
   const departments = actor.role === "superadmin"
     ? (await db.prepare(`
@@ -789,7 +836,7 @@ async function canView(user, task) {
   if (user.role === "admin") return true;
   const assignedUserIds = await taskAssigneeIds(task.task_id ?? task.id);
   if (assignedUserIds.length) return assignedUserIds.includes(user.id);
-  return !task.claim_requested_by_id || task.claim_requested_by_id === user.id;
+  return true;
 }
 
 function send(response, status, data) {
@@ -1719,6 +1766,7 @@ const server = createServer(async (request, response) => {
         project?.id ?? null, normalizeTaskType(body.taskType), dueDate, complexity,
         assignees.length ? 1 : 0, progress, existing.id);
       await setTaskAssignees(existing.id, assignees.map((assignee) => assignee.id));
+      if (assignees.length) await db.prepare("DELETE FROM task_claim_requests WHERE task_id = ?").run(existing.id);
       const nextIds = assignees.map((assignee) => assignee.id);
       const changes = [];
       if (String(body.title).trim() !== existing.title) changes.push(`Title: “${existing.title}” → “${String(body.title).trim()}”`);
@@ -1794,48 +1842,85 @@ const server = createServer(async (request, response) => {
       if (action === "claim") {
         if (actor.role !== "user" || !sameDepartment(actor.department, task.department) || assignedUserIds.length || !await canView(actor, task)) return send(response, 403, { message: "This task cannot be claimed." });
         const result = await db.prepare(`
-          UPDATE tasks SET claim_requested_by_id = ?, claim_requested_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-          WHERE id = ? AND claim_requested_by_id IS NULL
-            AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_id = ?)
-        `).run(actor.id, task.id, task.id);
-        if (!result.changes) return send(response, 409, { message: "Another claim request is already waiting for approval." });
+          INSERT OR IGNORE INTO task_claim_requests (task_id, user_id)
+          VALUES (?, ?)
+        `).run(task.id, actor.id);
+        if (!result.changes) return send(response, 409, { message: "Your request is already waiting for approval." });
+        await db.prepare(`
+          UPDATE tasks SET claim_requested_by_id = COALESCE(claim_requested_by_id, ?),
+            claim_requested_at = COALESCE(claim_requested_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(actor.id, task.id);
         await notifyTaskManagers(task, actor.id, "Task claim needs approval", `${actor.name} requested to take ${task.task_code}: ${task.title}`, task.id);
         await recordTaskEvent(task.id, actor, "claim_requested", "Requested to take this task");
       }
       if (action === "claim-approve") {
         if (!canManage(actor, task)) return send(response, 403, { message: "Manager approval is required." });
-        if (assignedUserIds.length || !task.claim_requested_by_id) return send(response, 409, { message: "This task has no pending claim request." });
-        const requester = await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(task.claim_requested_by_id);
-        if (!requester || !sameDepartment(requester.department, task.department)) return send(response, 409, { message: "The requesting user is no longer eligible." });
+        if (assignedUserIds.length) return send(response, 409, { message: "This task is already assigned." });
+        const pendingRequests = await db.prepare(`
+          SELECT users.* FROM task_claim_requests JOIN users ON users.id = task_claim_requests.user_id
+          WHERE task_claim_requests.task_id = ? AND users.role = 'user'
+          ORDER BY task_claim_requests.requested_at ASC
+        `).all(task.id);
+        if (!pendingRequests.length) return send(response, 409, { message: "This task has no pending claim requests." });
+        const requestedUserIds = Array.isArray(body.userIds) ? body.userIds.map(String) : [];
+        const approveAll = body.all === true || !requestedUserIds.length;
+        const selectedIds = approveAll ? pendingRequests.map((requester) => requester.id) : requestedUserIds;
+        const selectedIdSet = new Set(selectedIds);
+        const requesters = pendingRequests.filter((requester) => selectedIdSet.has(requester.id) && sameDepartment(requester.department, task.department));
+        if (!requesters.length) return send(response, 409, { message: "Select at least one eligible requester." });
+        const declinedRequesters = pendingRequests.filter((requester) => !requesters.some((approved) => approved.id === requester.id));
         await db.transaction(async () => {
-          await db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(task.id, requester.id);
+          for (const requester of requesters) {
+            await db.prepare("INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)").run(task.id, requester.id);
+          }
           await db.prepare(`
             UPDATE tasks SET assignee_id = ?, status = 'assigned', started_at = CURRENT_TIMESTAMP, due_date = ?,
               claim_requested_by_id = NULL, claim_requested_at = NULL, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-          `).run(requester.id, null, task.id);
+          `).run(requesters[0].id, null, task.id);
+          await db.prepare("DELETE FROM task_claim_requests WHERE task_id = ?").run(task.id);
         });
-        await notify(requester.id, "claim", "Task claim approved", `${actor.name} approved your request for ${task.task_code}: ${task.title}`, task.id);
-        await recordTaskEvent(task.id, actor, "claim_approved", `${requester.name} was assigned and the task started`);
+        for (const requester of requesters) await notify(requester.id, "claim", "Task claim approved", `${actor.name} approved your request for ${task.task_code}: ${task.title}`, task.id);
+        for (const requester of declinedRequesters) await notify(requester.id, "claim", "Task claim closed", `${actor.name} assigned ${task.task_code} to another requester.`, task.id);
+        await recordTaskEvent(task.id, actor, "claim_approved", `${requesters.map((requester) => requester.name).join(", ")} assigned and the task started`);
       }
       if (action === "claim-reject") {
         if (!canManage(actor, task)) return send(response, 403, { message: "Manager approval is required." });
-        if (!task.claim_requested_by_id) return send(response, 409, { message: "This task has no pending claim request." });
-        const requesterId = task.claim_requested_by_id;
-        await db.prepare("UPDATE tasks SET claim_requested_by_id = NULL, claim_requested_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
+        const requesterId = String(body.userId ?? task.claim_requested_by_id ?? "");
+        if (!requesterId) return send(response, 409, { message: "Choose a claim request to reject." });
+        const requester = await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'user'").get(requesterId);
+        const result = await db.prepare("DELETE FROM task_claim_requests WHERE task_id = ? AND user_id = ?").run(task.id, requesterId);
+        if (!result.changes) return send(response, 409, { message: "This claim request is no longer pending." });
+        const nextRequest = await db.prepare("SELECT user_id, requested_at FROM task_claim_requests WHERE task_id = ? ORDER BY requested_at ASC LIMIT 1").get(task.id);
+        await db.prepare("UPDATE tasks SET claim_requested_by_id = ?, claim_requested_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(nextRequest?.user_id ?? null, nextRequest?.requested_at ?? null, task.id);
         await notify(requesterId, "claim", "Task claim declined", `${actor.name} declined your request for ${task.task_code}: ${task.title}`, task.id);
-        await recordTaskEvent(task.id, actor, "claim_rejected", "Task claim request declined");
+        await recordTaskEvent(task.id, actor, "claim_rejected", `${requester?.name ?? "A requester"} claim request declined`);
       }
       if (action === "submit") {
         if (actor.role !== "user" || !assignedUserIds.includes(actor.id) || ["done", "under_review"].includes(task.status)) return send(response, 403, { message: "This task cannot be submitted." });
         const submitted = await db.prepare("INSERT OR IGNORE INTO task_worker_approvals (task_id, user_id) VALUES (?, ?)").run(task.id, actor.id);
         if (!submitted.changes) return send(response, 409, { message: "You already submitted this task for review." });
-        await recordTaskEvent(task.id, actor, "worker_finished", `${actor.name} finished their work and submitted it for review`);
         const approvedIds = (await db.prepare("SELECT user_id FROM task_worker_approvals WHERE task_id = ?").all(task.id)).map((item) => item.user_id);
         const remainingIds = assignedUserIds.filter((userId) => !approvedIds.includes(userId));
+        const remainingWorkers = remainingIds.length
+          ? await db.prepare(`SELECT name FROM users WHERE id IN (${remainingIds.map(() => "?").join(",")}) ORDER BY name`).all(...remainingIds)
+          : [];
+        const waitingNames = remainingWorkers.map((worker) => worker.name);
+        const waitingText = waitingNames.length <= 1
+          ? waitingNames[0]
+          : `${waitingNames.slice(0, -1).join(", ")} and ${waitingNames.at(-1)}`;
+        await recordTaskEvent(
+          task.id,
+          actor,
+          "worker_finished",
+          waitingNames.length
+            ? `${actor.name} → finished · waiting for ${waitingText} to approve`
+            : `${actor.name} → finished · all workers approved, waiting for admin review`
+        );
         if (remainingIds.length) {
           await db.prepare("UPDATE tasks SET status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
-          for (const userId of remainingIds) await notify(userId, "approval", "Worker approval needed", `${actor.name} approved ${task.task_code}. Your approval is still required.`, task.id);
+          for (const userId of remainingIds) await notify(userId, "approval", "Worker approval needed", `${actor.name} finished ${task.task_code}. Waiting for your approval.`, task.id);
         } else {
           await db.prepare("UPDATE tasks SET status = 'under_review', progress = 100, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(task.id);
           await notifyTaskAudience(task, actor.id, "Task ready for admin review", `All workers approved ${task.task_code}: ${task.title}`);
@@ -1862,6 +1947,7 @@ const server = createServer(async (request, response) => {
       }
       if (action === "messages") {
         if (!await canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
+        if (actor.role === "user" && !assignedUserIds.includes(actor.id)) return send(response, 403, { message: "Take or be assigned to this task before adding comments." });
         if (task.status === "done") return send(response, 409, { message: "Approved tasks are read-only. Existing comments remain available." });
         const message = String(body.body ?? "").trim();
         if (!message) throw new Error("Message cannot be empty.");
@@ -1872,6 +1958,7 @@ const server = createServer(async (request, response) => {
       }
       if (action === "files") {
         if (!await canView(actor, task)) return send(response, 403, { message: "You cannot view this task." });
+        if (actor.role === "user" && !assignedUserIds.includes(actor.id)) return send(response, 403, { message: "Take or be assigned to this task before attaching documents." });
         if (task.status === "done") return send(response, 409, { message: "Approved tasks are locked. Existing documents remain available for download." });
         const uploadedFiles = Array.isArray(body.files) ? body.files : [];
         await saveTaskFiles(task.id, actor, uploadedFiles);
@@ -2031,18 +2118,20 @@ const server = createServer(async (request, response) => {
       }
       const mentionedNames = new Set([...messageBody.matchAll(/@\[([^\]]+)\]/g)].map((match) => match[1].trim().toLocaleLowerCase()));
       const possibleRecipients = await db.prepare("SELECT * FROM users WHERE id != ? ORDER BY name").all(actor.id);
+      const notificationContext = await chatNotificationContext(channelId, department);
+      const preview = chatMessagePreview(messageBody, incomingFiles.length);
       for (const recipient of possibleRecipients) {
         try {
           await resolveChatChannel(recipient, channelId);
           const wasMentioned = mentionedNames.has(recipient.name.trim().toLocaleLowerCase());
-          const preview = messageBody || `${incomingFiles.length} attachment${incomingFiles.length === 1 ? "" : "s"}`;
           await notify(
             recipient.id,
             wasMentioned ? "mention" : "chat",
-            wasMentioned ? `${actor.name} mentioned you` : `New message from ${actor.name}`,
-            preview.slice(0, 240),
-            null,
-            channelId
+            notificationContext.title,
+            wasMentioned ? `${actor.name} mentioned you: ${preview}` : `New message from ${actor.name}: ${preview}`,
+            notificationContext.taskId,
+            channelId,
+            `chat:${messageId}:${recipient.id}`
           );
         } catch { /* This user is not a participant in the conversation. */ }
       }

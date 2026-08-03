@@ -51,6 +51,11 @@ export type ManagedTask = {
     userName: string;
     requestedAt?: string;
   };
+  claimRequests: Array<{
+    userId: string;
+    userName: string;
+    requestedAt?: string;
+  }>;
   projectId?: string;
   projectName?: string;
   taskType: TaskType;
@@ -309,7 +314,7 @@ export const api = {
     request(`/api/users/${user.id}`, { method: "PUT", body: JSON.stringify(user) }),
   deleteUser: (userId: string) => request(`/api/users/${userId}`, { method: "DELETE" }),
   async createTask(
-    task: Omit<ManagedTask, "id" | "taskCode" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso" | "startedAt" | "workerApprovals" | "pendingApprovalNames" | "reopenCount" | "events">,
+    task: Omit<ManagedTask, "id" | "taskCode" | "files" | "messages" | "status" | "createdAt" | "updatedAt" | "completedAtIso" | "startedAt" | "workerApprovals" | "pendingApprovalNames" | "claimRequest" | "claimRequests" | "reopenCount" | "events">,
     files: File[] = []
   ) {
     return request("/api/tasks", {

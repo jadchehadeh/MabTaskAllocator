@@ -1,0 +1,738 @@
+2026-08-02 13:57:09.935 +03 [9260] LOG:  starting PostgreSQL 18.4 on x86_64-windows, compiled by msvc-19.44.35227, 64-bit
+2026-08-02 13:57:09.940 +03 [9260] LOG:  listening on IPv6 address "::1", port 55432
+2026-08-02 13:57:09.940 +03 [9260] LOG:  listening on IPv4 address "127.0.0.1", port 55432
+2026-08-02 13:57:09.997 +03 [12708] LOG:  database system was shut down at 2026-08-02 13:57:05 +03
+2026-08-02 13:57:10.005 +03 [9260] LOG:  database system is ready to accept connections
+2026-08-02 14:02:09.988 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:04:09.905 +03 [27576] LOG:  checkpoint complete: wrote 1100 buffers (6.7%), wrote 3 SLRU buffers; 1 WAL file(s) added, 0 removed, 0 recycled; write=119.468 s, sync=0.384 s, total=119.917 s; sync files=440, longest=0.003 s, average=0.001 s; distance=5806 kB, estimate=5806 kB; lsn=0/1D9D430, redo lsn=0/1D9CBB8
+2026-08-02 14:07:09.933 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:07:11.163 +03 [27576] LOG:  checkpoint complete: wrote 11 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=1.204 s, sync=0.013 s, total=1.230 s; sync files=8, longest=0.003 s, average=0.002 s; distance=3 kB, estimate=5226 kB; lsn=0/1D9D820, redo lsn=0/1D9D7C8
+2026-08-02 14:12:09.173 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:12:09.852 +03 [27576] LOG:  checkpoint complete: wrote 6 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.661 s, sync=0.009 s, total=0.680 s; sync files=7, longest=0.002 s, average=0.002 s; distance=21 kB, estimate=4705 kB; lsn=0/1DA2F40, redo lsn=0/1DA2EE8
+2026-08-02 14:17:09.860 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:17:11.965 +03 [27576] LOG:  checkpoint complete: wrote 19 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=2.078 s, sync=0.018 s, total=2.106 s; sync files=13, longest=0.007 s, average=0.002 s; distance=106 kB, estimate=4245 kB; lsn=0/1DBDAF0, redo lsn=0/1DBDA60
+2026-08-02 14:21:40.224 +03 [9260] LOG:  could not reserve shared memory region (addr=00000236130B0000) for child 0000000000001604: error code 487
+2026-08-02 14:22:09.968 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:22:10.537 +03 [27576] LOG:  checkpoint complete: wrote 5 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.552 s, sync=0.007 s, total=0.569 s; sync files=6, longest=0.002 s, average=0.002 s; distance=18 kB, estimate=3823 kB; lsn=0/1DC2518, redo lsn=0/1DC24C0
+2026-08-02 14:26:40.265 +03 [9260] LOG:  could not reserve shared memory region (addr=00000236130B0000) for child 0000000000001570: error code 487
+2026-08-02 14:27:09.537 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:27:11.842 +03 [27576] LOG:  checkpoint complete: wrote 21 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=2.285 s, sync=0.012 s, total=2.305 s; sync files=12, longest=0.002 s, average=0.001 s; distance=139 kB, estimate=3454 kB; lsn=0/1DE5238, redo lsn=0/1DE51E0
+2026-08-02 14:32:09.852 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:32:11.849 +03 [27576] LOG:  checkpoint complete: wrote 18 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=1.974 s, sync=0.013 s, total=1.997 s; sync files=11, longest=0.003 s, average=0.002 s; distance=109 kB, estimate=3120 kB; lsn=0/1E00B20, redo lsn=0/1E008A8
+2026-08-02 14:37:09.853 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:37:10.405 +03 [27576] LOG:  checkpoint complete: wrote 5 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.536 s, sync=0.008 s, total=0.553 s; sync files=6, longest=0.002 s, average=0.002 s; distance=23 kB, estimate=2810 kB; lsn=0/1E067E0, redo lsn=0/1E06788
+2026-08-02 14:42:09.414 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:42:13.934 +03 [27576] LOG:  checkpoint complete: wrote 41 buffers (0.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=4.484 s, sync=0.026 s, total=4.520 s; sync files=29, longest=0.002 s, average=0.001 s; distance=91 kB, estimate=2538 kB; lsn=0/1E1E2F8, redo lsn=0/1E1D658
+2026-08-02 14:46:41.266 +03 [32416] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 14:46:49.910 +03 [29332] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 14:46:56.943 +03 [31820] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 14:47:09.945 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:47:13.671 +03 [27576] LOG:  checkpoint complete: wrote 34 buffers (0.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=3.694 s, sync=0.024 s, total=3.727 s; sync files=26, longest=0.002 s, average=0.001 s; distance=169 kB, estimate=2301 kB; lsn=0/1E492B0, redo lsn=0/1E47AE8
+2026-08-02 14:47:33.447 +03 [32072] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 14:48:07.304 +03 [31920] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 14:52:09.674 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:52:13.534 +03 [27576] LOG:  checkpoint complete: wrote 35 buffers (0.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=3.813 s, sync=0.032 s, total=3.860 s; sync files=30, longest=0.005 s, average=0.002 s; distance=141 kB, estimate=2085 kB; lsn=0/1E6B048, redo lsn=0/1E6AFF0
+2026-08-02 14:57:09.539 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 14:57:12.062 +03 [27576] LOG:  checkpoint complete: wrote 23 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=2.497 s, sync=0.018 s, total=2.523 s; sync files=20, longest=0.002 s, average=0.001 s; distance=126 kB, estimate=1889 kB; lsn=0/1E8A930, redo lsn=0/1E8A8A0
+2026-08-02 15:02:09.073 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:02:18.100 +03 [27576] LOG:  checkpoint complete: wrote 82 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=8.971 s, sync=0.046 s, total=9.028 s; sync files=53, longest=0.002 s, average=0.001 s; distance=147 kB, estimate=1715 kB; lsn=0/1EB0A50, redo lsn=0/1EAF5C8
+2026-08-02 15:07:09.112 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:07:13.080 +03 [27576] LOG:  checkpoint complete: wrote 36 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=3.921 s, sync=0.038 s, total=3.969 s; sync files=38, longest=0.002 s, average=0.001 s; distance=82 kB, estimate=1552 kB; lsn=0/1EC3E48, redo lsn=0/1EC3DF0
+2026-08-02 15:12:09.093 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:12:11.943 +03 [27576] LOG:  checkpoint complete: wrote 26 buffers (0.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=2.819 s, sync=0.023 s, total=2.851 s; sync files=26, longest=0.002 s, average=0.001 s; distance=75 kB, estimate=1404 kB; lsn=0/1ED6CE8, redo lsn=0/1ED6C90
+2026-08-02 15:17:09.947 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:17:15.457 +03 [27576] LOG:  checkpoint complete: wrote 50 buffers (0.3%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=5.461 s, sync=0.041 s, total=5.511 s; sync files=47, longest=0.002 s, average=0.001 s; distance=176 kB, estimate=1281 kB; lsn=0/1F02F00, redo lsn=0/1F02EA8
+2026-08-02 15:22:09.464 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:22:12.653 +03 [27576] LOG:  checkpoint complete: wrote 29 buffers (0.2%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=3.157 s, sync=0.023 s, total=3.189 s; sync files=25, longest=0.002 s, average=0.001 s; distance=131 kB, estimate=1166 kB; lsn=0/1F23D90, redo lsn=0/1F23D38
+2026-08-02 15:27:09.658 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:27:10.000 +03 [27576] LOG:  checkpoint complete: wrote 3 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.323 s, sync=0.011 s, total=0.342 s; sync files=4, longest=0.007 s, average=0.003 s; distance=11 kB, estimate=1051 kB; lsn=0/1F26C88, redo lsn=0/1F26C30
+2026-08-02 15:32:10.007 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:32:10.466 +03 [27576] LOG:  checkpoint complete: wrote 4 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.445 s, sync=0.006 s, total=0.460 s; sync files=4, longest=0.002 s, average=0.002 s; distance=28 kB, estimate=948 kB; lsn=0/1F2DE28, redo lsn=0/1F2DDD0
+2026-08-02 15:42:10.478 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:42:12.258 +03 [27576] LOG:  checkpoint complete: wrote 16 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=1.752 s, sync=0.018 s, total=1.781 s; sync files=17, longest=0.002 s, average=0.002 s; distance=41 kB, estimate=858 kB; lsn=0/1F38480, redo lsn=0/1F38428
+2026-08-02 15:47:10.267 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:47:13.487 +03 [27576] LOG:  checkpoint complete: wrote 29 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=3.190 s, sync=0.021 s, total=3.221 s; sync files=22, longest=0.002 s, average=0.001 s; distance=164 kB, estimate=788 kB; lsn=0/1F61538, redo lsn=0/1F614E0
+2026-08-02 15:49:38.978 +03 [8504] LOG:  could not send data to client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 15:49:38.978 +03 [8504] STATEMENT:  CREATE TABLE IF NOT EXISTS users (
+	  id text PRIMARY KEY,
+	  name text NOT NULL,
+	  username text NOT NULL,
+	  password_hash text NOT NULL,
+	  role text NOT NULL CHECK (role IN ('superadmin', 'admin', 'user')),
+	  department text NOT NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS departments (
+	  id text PRIMARY KEY,
+	  name text NOT NULL,
+	  created_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_departments_name_ci ON departments (lower(name));
+	
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_ci ON users (lower(username));
+	
+	CREATE TABLE IF NOT EXISTS sessions (
+	  token text PRIMARY KEY,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  last_active_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS attendance_records (
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  work_date text NOT NULL,
+	  first_login_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  last_login_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  login_count integer NOT NULL DEFAULT 1,
+	  PRIMARY KEY (user_id, work_date)
+	);
+	
+	CREATE TABLE IF NOT EXISTS projects (
+	  id text PRIMARY KEY,
+	  name text NOT NULL,
+	  description text NOT NULL DEFAULT '',
+	  department text NOT NULL,
+	  created_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS project_members (
+	  project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  PRIMARY KEY (project_id, user_id)
+	);
+	
+	CREATE TABLE IF NOT EXISTS tasks (
+	  id text PRIMARY KEY,
+	  title text NOT NULL,
+	  department text NOT NULL,
+	  priority text NOT NULL CHECK (priority IN ('low', 'medium', 'high', 'urgent')),
+	  status text NOT NULL CHECK (status IN ('new', 'assigned', 'in_progress', 'blocked', 'under_review', 'done')),
+	  assignee_id text REFERENCES users(id) ON DELETE SET NULL,
+	  project_id text REFERENCES projects(id) ON DELETE SET NULL,
+	  task_type text NOT NULL DEFAULT 'Technical',
+	  task_code text,
+	  due_date text,
+	  complexity integer NOT NULL DEFAULT 3 CHECK (complexity BETWEEN 1 AND 5),
+	  started_at text,
+	  claim_requested_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  claim_requested_at text,
+	  progress integer NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
+	  review_comment text,
+	  completed_at text,
+	  created_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  updated_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_assignees (
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  PRIMARY KEY (task_id, user_id)
+	);
+	
+	ALTER TABLE tasks ALTER COLUMN due_date DROP NOT NULL;
+	ALTER TABLE tasks ADD COLUMN IF NOT EXISTS complexity integer NOT NULL DEFAULT 3;
+	ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at text;
+	ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claim_requested_by_id text REFERENCES users(id) ON DELETE SET NULL;
+	ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claim_requested_at text;
+	DO $$ BEGIN
+	  ALTER TABLE tasks ADD CONSTRAINT tasks_complexity_check CHECK (complexity BETWEEN 1 AND 5);
+	EXCEPTION WHEN duplicate_object THEN NULL;
+	END $$;
+	
+	UPDATE tasks SET complexity = 3 WHERE complexity IS NULL OR complexity < 1 OR complexity > 5;
+	UPDATE tasks SET started_at = created_at
+	WHERE started_at IS NULL AND EXISTS (SELECT 1 FROM task_assignees WHERE task_assignees.task_id = tasks.id);
+	UPDATE tasks SET due_date = NULL, started_at = NULL
+	WHERE status != 'done' AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_assignees.task_id = tasks.id);
+	
+	CREATE TABLE IF NOT EXISTS task_worker_approvals (
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  approved_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  PRIMARY KEY (task_id, user_id)
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_reopen_events (
+	  id text PRIMARY KEY,
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  reviewer_id text REFERENCES users(id) ON DELETE SET NULL,
+	  comment text NOT NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_events (
+	  id text PRIMARY KEY,
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  actor_id text REFERENCES users(id) ON DELETE SET NULL,
+	  actor_name text NOT NULL,
+	  event_type text NOT NULL,
+	  details text NOT NULL DEFAULT '',
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details, created_at)
+	SELECT 'created-' || tasks.id, tasks.id, tasks.created_by_id, COALESCE(users.name, 'System'), 'created', 'Task created', tasks.created_at
+	FROM tasks LEFT JOIN users ON users.id = tasks.created_by_id
+	WHERE NOT EXISTS (SELECT 1 FROM task_events existing WHERE existing.task_id = tasks.id AND existing.event_type = 'created')
+	ON CONFLICT DO NOTHING;
+	
+	INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details, created_at)
+	SELECT 'completed-' || tasks.id, tasks.id, NULL, 'Manager', 'approved', 'Task approved and completed', tasks.completed_at
+	FROM tasks WHERE tasks.status = 'done' AND tasks.completed_at IS NOT NULL
+	  AND NOT EXISTS (SELECT 1 FROM task_events existing WHERE existing.task_id = tasks.id AND existing.event_type = 'approved')
+	ON CONFLICT DO NOTHING;
+	
+	INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details, created_at)
+	SELECT 'reopen-' || task_reopen_events.id, task_reopen_events.task_id, task_reopen_events.reviewer_id,
+	  COALESCE(users.name, 'Manager'), 'reopened', task_reopen_events.comment, task_reopen_events.created_at
+	FROM task_reopen_events LEFT JOIN users ON users.id = task_reopen_events.reviewer_id
+	ON CONFLICT DO NOTHING;
+	
+	CREATE TABLE IF NOT EXISTS task_code_sequences (
+	  prefix text PRIMARY KEY,
+	  next_number integer NOT NULL
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_messages (
+	  id text PRIMARY KEY,
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  author_id text REFERENCES users(id) ON DELETE SET NULL,
+	  author_name text NOT NULL,
+	  body text NOT NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_files (
+	  id text PRIMARY KEY,
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  name text NOT NULL,
+	  uploaded_by text NOT NULL,
+	  uploaded_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  storage_name text,
+	  mime_type text,
+	  size integer NOT NULL DEFAULT 0
+	);
+	
+	CREATE TABLE IF NOT EXISTS notifications (
+	  id text PRIMARY KEY,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  kind text NOT NULL,
+	  title text NOT NULL,
+	  body text NOT NULL,
+	  task_id text REFERENCES tasks(id) ON DELETE CASCADE,
+	  channel_id text,
+	  dedupe_key text,
+	  is_read integer NOT NULL DEFAULT 0,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS system_audit_logs (
+	  id text PRIMARY KEY,
+	  actor_id text REFERENCES users(id) ON DELETE SET NULL,
+	  actor_name text NOT NULL,
+	  action text NOT NULL,
+	  entity_type text NOT NULL,
+	  entity_id text,
+	  department text,
+	  details text NOT NULL DEFAULT '',
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	ALTER TABLE notifications ADD COLUMN IF NOT EXISTS channel_id text;
+	ALTER TABLE notifications ADD COLUMN IF NOT EXISTS dedupe_key text;
+	
+	CREATE TABLE IF NOT EXISTS todos (
+	  id text PRIMARY KEY,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  task_id text REFERENCES tasks(id) ON DELETE SET NULL,
+	  title text NOT NULL,
+	  is_completed integer NOT NULL DEFAULT 0,
+	  completed_at text,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  updated_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS chat_groups (
+	  id text PRIMARY KEY,
+	  name text NOT NULL,
+	  department text NOT NULL,
+	  created_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  task_id text REFERENCES tasks(id) ON DELETE CASCADE,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS chat_messages (
+	  id text PRIMARY KEY,
+	  channel_id text NOT NULL,
+	  department text NOT NULL,
+	  author_id text REFERENCES users(id) ON DELETE SET NULL,
+	  author_name text NOT NULL,
+	  body text NOT NULL DEFAULT '',
+	  reply_to_id text REFERENCES chat_messages(id) ON DELETE SET NULL,
+	  deleted_at text,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	ALTER TABLE chat_messages ALTER COLUMN body SET DEFAULT '';
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to_id text REFERENCES chat_messages(id) ON DELETE SET NULL;
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS deleted_at text;
+	
+	CREATE TABLE IF NOT EXISTS chat_message_hidden (
+	  message_id text NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  hidden_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  PRIMARY KEY (message_id, user_id)
+	);
+	
+	CREATE TABLE IF NOT EXISTS chat_message_files (
+	  id text PRIMARY KEY,
+	  message_id text NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+	  name text NOT NULL,
+	  uploaded_by text NOT NULL,
+	  uploaded_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  storage_name text NOT NULL,
+	  mime_type text,
+	  size integer NOT NULL DEFAULT 0
+	);
+	
+	CREATE TABLE IF NOT EXISTS chat_reads (
+	  channel_id text NOT NULL,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  last_read_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  PRIMARY KEY (channel_id, user_id)
+	);
+	
+	CREATE INDEX IF NOT EXISTS idx_tasks_department ON tasks(department);
+	CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
+	CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
+	CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+	CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
+	CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
+	CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_code ON tasks(task_code);
+	CREATE INDEX IF NOT EXISTS idx_task_assignees_user ON task_assignees(user_id, task_id);
+	CREATE INDEX IF NOT EXISTS idx_task_reopen_events_task ON task_reopen_events(task_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_task_events_actor_type ON task_events(actor_id, event_type, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, project_id);
+	CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_files(task_id, uploaded_at);
+	CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL;
+	CREATE INDEX IF NOT EXISTS idx_audit_created ON system_audit_logs(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_audit_department ON system_audit_logs(department, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_todos_user ON todos(user_id, is_completed, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_active_at);
+	CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance_records(user_id, work_date DESC);
+	CREATE INDEX IF NOT EXISTS idx_chat_groups_department ON chat_groups(department, created_at);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_groups_task ON chat_groups(task_id) WHERE task_id IS NOT NULL;
+	CREATE INDEX IF NOT EXISTS idx_chat_messages_department ON chat_messages(department, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_chat_messages_channel ON chat_messages(channel_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_chat_message_files_message ON chat_message_files(message_id);
+	CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads(user_id, channel_id);
+	CREATE INDEX IF NOT EXISTS idx_chat_message_hidden_user ON chat_message_hidden(user_id, message_id);
+	
+	INSERT INTO departments (id, name)
+	VALUES
+	  ('department-executive', 'Executive'),
+	  ('department-mechanical', 'Mechanical Technical office engineer'),
+	  ('department-electrical', 'Electrical Technical office engineer'),
+	  ('department-document-control', 'Document Controller')
+	ON CONFLICT DO NOTHING;
+	
+	INSERT INTO departments (id, name)
+	SELECT 'department-' || md5(department), department
+	FROM (
+	  SELECT department FROM users
+	  UNION SELECT department FROM projects
+	  UNION SELECT department FROM tasks
+	  UNION SELECT department FROM chat_groups
+	) existing_departments
+	WHERE department IS NOT NULL AND department != ''
+	ON CONFLICT DO NOTHING;
+	
+2026-08-02 15:49:38.978 +03 [8504] FATAL:  connection to client lost
+2026-08-02 15:49:38.978 +03 [8504] STATEMENT:  CREATE TABLE IF NOT EXISTS users (
+	  id text PRIMARY KEY,
+	  name text NOT NULL,
+	  username text NOT NULL,
+	  password_hash text NOT NULL,
+	  role text NOT NULL CHECK (role IN ('superadmin', 'admin', 'user')),
+	  department text NOT NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS departments (
+	  id text PRIMARY KEY,
+	  name text NOT NULL,
+	  created_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_departments_name_ci ON departments (lower(name));
+	
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_ci ON users (lower(username));
+	
+	CREATE TABLE IF NOT EXISTS sessions (
+	  token text PRIMARY KEY,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  last_active_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS attendance_records (
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  work_date text NOT NULL,
+	  first_login_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  last_login_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  login_count integer NOT NULL DEFAULT 1,
+	  PRIMARY KEY (user_id, work_date)
+	);
+	
+	CREATE TABLE IF NOT EXISTS projects (
+	  id text PRIMARY KEY,
+	  name text NOT NULL,
+	  description text NOT NULL DEFAULT '',
+	  department text NOT NULL,
+	  created_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS project_members (
+	  project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  PRIMARY KEY (project_id, user_id)
+	);
+	
+	CREATE TABLE IF NOT EXISTS tasks (
+	  id text PRIMARY KEY,
+	  title text NOT NULL,
+	  department text NOT NULL,
+	  priority text NOT NULL CHECK (priority IN ('low', 'medium', 'high', 'urgent')),
+	  status text NOT NULL CHECK (status IN ('new', 'assigned', 'in_progress', 'blocked', 'under_review', 'done')),
+	  assignee_id text REFERENCES users(id) ON DELETE SET NULL,
+	  project_id text REFERENCES projects(id) ON DELETE SET NULL,
+	  task_type text NOT NULL DEFAULT 'Technical',
+	  task_code text,
+	  due_date text,
+	  complexity integer NOT NULL DEFAULT 3 CHECK (complexity BETWEEN 1 AND 5),
+	  started_at text,
+	  claim_requested_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  claim_requested_at text,
+	  progress integer NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
+	  review_comment text,
+	  completed_at text,
+	  created_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  updated_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_assignees (
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  PRIMARY KEY (task_id, user_id)
+	);
+	
+	ALTER TABLE tasks ALTER COLUMN due_date DROP NOT NULL;
+	ALTER TABLE tasks ADD COLUMN IF NOT EXISTS complexity integer NOT NULL DEFAULT 3;
+	ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at text;
+	ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claim_requested_by_id text REFERENCES users(id) ON DELETE SET NULL;
+	ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claim_requested_at text;
+	DO $$ BEGIN
+	  ALTER TABLE tasks ADD CONSTRAINT tasks_complexity_check CHECK (complexity BETWEEN 1 AND 5);
+	EXCEPTION WHEN duplicate_object THEN NULL;
+	END $$;
+	
+	UPDATE tasks SET complexity = 3 WHERE complexity IS NULL OR complexity < 1 OR complexity > 5;
+	UPDATE tasks SET started_at = created_at
+	WHERE started_at IS NULL AND EXISTS (SELECT 1 FROM task_assignees WHERE task_assignees.task_id = tasks.id);
+	UPDATE tasks SET due_date = NULL, started_at = NULL
+	WHERE status != 'done' AND NOT EXISTS (SELECT 1 FROM task_assignees WHERE task_assignees.task_id = tasks.id);
+	
+	CREATE TABLE IF NOT EXISTS task_worker_approvals (
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  approved_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  PRIMARY KEY (task_id, user_id)
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_reopen_events (
+	  id text PRIMARY KEY,
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  reviewer_id text REFERENCES users(id) ON DELETE SET NULL,
+	  comment text NOT NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_events (
+	  id text PRIMARY KEY,
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  actor_id text REFERENCES users(id) ON DELETE SET NULL,
+	  actor_name text NOT NULL,
+	  event_type text NOT NULL,
+	  details text NOT NULL DEFAULT '',
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details, created_at)
+	SELECT 'created-' || tasks.id, tasks.id, tasks.created_by_id, COALESCE(users.name, 'System'), 'created', 'Task created', tasks.created_at
+	FROM tasks LEFT JOIN users ON users.id = tasks.created_by_id
+	WHERE NOT EXISTS (SELECT 1 FROM task_events existing WHERE existing.task_id = tasks.id AND existing.event_type = 'created')
+	ON CONFLICT DO NOTHING;
+	
+	INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details, created_at)
+	SELECT 'completed-' || tasks.id, tasks.id, NULL, 'Manager', 'approved', 'Task approved and completed', tasks.completed_at
+	FROM tasks WHERE tasks.status = 'done' AND tasks.completed_at IS NOT NULL
+	  AND NOT EXISTS (SELECT 1 FROM task_events existing WHERE existing.task_id = tasks.id AND existing.event_type = 'approved')
+	ON CONFLICT DO NOTHING;
+	
+	INSERT INTO task_events (id, task_id, actor_id, actor_name, event_type, details, created_at)
+	SELECT 'reopen-' || task_reopen_events.id, task_reopen_events.task_id, task_reopen_events.reviewer_id,
+	  COALESCE(users.name, 'Manager'), 'reopened', task_reopen_events.comment, task_reopen_events.created_at
+	FROM task_reopen_events LEFT JOIN users ON users.id = task_reopen_events.reviewer_id
+	ON CONFLICT DO NOTHING;
+	
+	CREATE TABLE IF NOT EXISTS task_code_sequences (
+	  prefix text PRIMARY KEY,
+	  next_number integer NOT NULL
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_messages (
+	  id text PRIMARY KEY,
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  author_id text REFERENCES users(id) ON DELETE SET NULL,
+	  author_name text NOT NULL,
+	  body text NOT NULL,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS task_files (
+	  id text PRIMARY KEY,
+	  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	  name text NOT NULL,
+	  uploaded_by text NOT NULL,
+	  uploaded_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  storage_name text,
+	  mime_type text,
+	  size integer NOT NULL DEFAULT 0
+	);
+	
+	CREATE TABLE IF NOT EXISTS notifications (
+	  id text PRIMARY KEY,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  kind text NOT NULL,
+	  title text NOT NULL,
+	  body text NOT NULL,
+	  task_id text REFERENCES tasks(id) ON DELETE CASCADE,
+	  channel_id text,
+	  dedupe_key text,
+	  is_read integer NOT NULL DEFAULT 0,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS system_audit_logs (
+	  id text PRIMARY KEY,
+	  actor_id text REFERENCES users(id) ON DELETE SET NULL,
+	  actor_name text NOT NULL,
+	  action text NOT NULL,
+	  entity_type text NOT NULL,
+	  entity_id text,
+	  department text,
+	  details text NOT NULL DEFAULT '',
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	ALTER TABLE notifications ADD COLUMN IF NOT EXISTS channel_id text;
+	ALTER TABLE notifications ADD COLUMN IF NOT EXISTS dedupe_key text;
+	
+	CREATE TABLE IF NOT EXISTS todos (
+	  id text PRIMARY KEY,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  task_id text REFERENCES tasks(id) ON DELETE SET NULL,
+	  title text NOT NULL,
+	  is_completed integer NOT NULL DEFAULT 0,
+	  completed_at text,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  updated_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS chat_groups (
+	  id text PRIMARY KEY,
+	  name text NOT NULL,
+	  department text NOT NULL,
+	  created_by_id text REFERENCES users(id) ON DELETE SET NULL,
+	  task_id text REFERENCES tasks(id) ON DELETE CASCADE,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	CREATE TABLE IF NOT EXISTS chat_messages (
+	  id text PRIMARY KEY,
+	  channel_id text NOT NULL,
+	  department text NOT NULL,
+	  author_id text REFERENCES users(id) ON DELETE SET NULL,
+	  author_name text NOT NULL,
+	  body text NOT NULL DEFAULT '',
+	  reply_to_id text REFERENCES chat_messages(id) ON DELETE SET NULL,
+	  deleted_at text,
+	  created_at text NOT NULL DEFAULT (timezone('UTC', now())::text)
+	);
+	
+	ALTER TABLE chat_messages ALTER COLUMN body SET DEFAULT '';
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to_id text REFERENCES chat_messages(id) ON DELETE SET NULL;
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS deleted_at text;
+	
+	CREATE TABLE IF NOT EXISTS chat_message_hidden (
+	  message_id text NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  hidden_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  PRIMARY KEY (message_id, user_id)
+	);
+	
+	CREATE TABLE IF NOT EXISTS chat_message_files (
+	  id text PRIMARY KEY,
+	  message_id text NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+	  name text NOT NULL,
+	  uploaded_by text NOT NULL,
+	  uploaded_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  storage_name text NOT NULL,
+	  mime_type text,
+	  size integer NOT NULL DEFAULT 0
+	);
+	
+	CREATE TABLE IF NOT EXISTS chat_reads (
+	  channel_id text NOT NULL,
+	  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	  last_read_at text NOT NULL DEFAULT (timezone('UTC', now())::text),
+	  PRIMARY KEY (channel_id, user_id)
+	);
+	
+	CREATE INDEX IF NOT EXISTS idx_tasks_department ON tasks(department);
+	CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
+	CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
+	CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+	CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
+	CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
+	CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_code ON tasks(task_code);
+	CREATE INDEX IF NOT EXISTS idx_task_assignees_user ON task_assignees(user_id, task_id);
+	CREATE INDEX IF NOT EXISTS idx_task_reopen_events_task ON task_reopen_events(task_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_task_events_actor_type ON task_events(actor_id, event_type, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, project_id);
+	CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_files(task_id, uploaded_at);
+	CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL;
+	CREATE INDEX IF NOT EXISTS idx_audit_created ON system_audit_logs(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_audit_department ON system_audit_logs(department, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_todos_user ON todos(user_id, is_completed, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_active_at);
+	CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance_records(user_id, work_date DESC);
+	CREATE INDEX IF NOT EXISTS idx_chat_groups_department ON chat_groups(department, created_at);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_groups_task ON chat_groups(task_id) WHERE task_id IS NOT NULL;
+	CREATE INDEX IF NOT EXISTS idx_chat_messages_department ON chat_messages(department, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_chat_messages_channel ON chat_messages(channel_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_chat_message_files_message ON chat_message_files(message_id);
+	CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads(user_id, channel_id);
+	CREATE INDEX IF NOT EXISTS idx_chat_message_hidden_user ON chat_message_hidden(user_id, message_id);
+	
+	INSERT INTO departments (id, name)
+	VALUES
+	  ('department-executive', 'Executive'),
+	  ('department-mechanical', 'Mechanical Technical office engineer'),
+	  ('department-electrical', 'Electrical Technical office engineer'),
+	  ('department-document-control', 'Document Controller')
+	ON CONFLICT DO NOTHING;
+	
+	INSERT INTO departments (id, name)
+	SELECT 'department-' || md5(department), department
+	FROM (
+	  SELECT department FROM users
+	  UNION SELECT department FROM projects
+	  UNION SELECT department FROM tasks
+	  UNION SELECT department FROM chat_groups
+	) existing_departments
+	WHERE department IS NOT NULL AND department != ''
+	ON CONFLICT DO NOTHING;
+	
+2026-08-02 15:49:40.801 +03 [30880] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 15:52:10.501 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:52:16.904 +03 [27576] LOG:  checkpoint complete: wrote 58 buffers (0.4%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=6.362 s, sync=0.030 s, total=6.403 s; sync files=33, longest=0.002 s, average=0.001 s; distance=328 kB, estimate=742 kB; lsn=0/1FB4490, redo lsn=0/1FB3558
+2026-08-02 15:57:10.915 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 15:57:14.328 +03 [27576] LOG:  checkpoint complete: wrote 31 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=3.378 s, sync=0.027 s, total=3.414 s; sync files=29, longest=0.002 s, average=0.001 s; distance=119 kB, estimate=680 kB; lsn=0/1FD1398, redo lsn=0/1FD1308
+2026-08-02 16:02:10.338 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:02:17.075 +03 [27576] LOG:  checkpoint complete: wrote 61 buffers (0.4%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=6.670 s, sync=0.052 s, total=6.737 s; sync files=57, longest=0.002 s, average=0.001 s; distance=197 kB, estimate=632 kB; lsn=0/2003330, redo lsn=0/2002AF0
+2026-08-02 16:03:08.830 +03 [30328] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:03:30.407 +03 [28776] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:03:43.652 +03 [2016] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:04:12.287 +03 [31084] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:04:12.287 +03 [31136] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:04:12.287 +03 [32072] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:07:10.090 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:07:13.829 +03 [27576] LOG:  checkpoint complete: wrote 34 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=3.697 s, sync=0.034 s, total=3.739 s; sync files=36, longest=0.002 s, average=0.001 s; distance=130 kB, estimate=582 kB; lsn=0/2024DB8, redo lsn=0/2023630
+2026-08-02 16:12:10.838 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:12:13.607 +03 [27576] LOG:  checkpoint complete: wrote 25 buffers (0.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=2.738 s, sync=0.023 s, total=2.769 s; sync files=25, longest=0.002 s, average=0.001 s; distance=89 kB, estimate=532 kB; lsn=0/2039C88, redo lsn=0/2039C30
+2026-08-02 16:16:25.774 +03 [24512] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:16:52.127 +03 [17980] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:16:52.127 +03 [32364] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:16:52.127 +03 [6368] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:16:52.127 +03 [29252] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:17:10.611 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:17:15.435 +03 [27576] LOG:  checkpoint complete: wrote 44 buffers (0.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=4.778 s, sync=0.036 s, total=4.824 s; sync files=42, longest=0.002 s, average=0.001 s; distance=148 kB, estimate=494 kB; lsn=0/20604D8, redo lsn=0/205EEF0
+2026-08-02 16:21:01.489 +03 [30576] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:21:10.034 +03 [20940] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:21:44.436 +03 [8704] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:22:09.779 +03 [29268] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:22:10.439 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:22:17.936 +03 [27576] LOG:  checkpoint complete: wrote 68 buffers (0.4%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=7.437 s, sync=0.052 s, total=7.498 s; sync files=60, longest=0.002 s, average=0.001 s; distance=402 kB, estimate=485 kB; lsn=0/20C6F48, redo lsn=0/20C3970
+2026-08-02 16:25:10.043 +03 [28352] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:25:10.044 +03 [31628] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:25:10.044 +03 [8144] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:25:10.044 +03 [1260] LOG:  could not receive data from client: An existing connection was forcibly closed by the remote host.
+	
+2026-08-02 16:27:10.949 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:27:15.910 +03 [27576] LOG:  checkpoint complete: wrote 45 buffers (0.3%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=4.915 s, sync=0.036 s, total=4.961 s; sync files=42, longest=0.002 s, average=0.001 s; distance=172 kB, estimate=453 kB; lsn=0/20EFD78, redo lsn=0/20EEB90
+2026-08-02 16:32:10.923 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:32:14.360 +03 [27576] LOG:  checkpoint complete: wrote 31 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=3.397 s, sync=0.031 s, total=3.437 s; sync files=32, longest=0.003 s, average=0.001 s; distance=118 kB, estimate=420 kB; lsn=0/210C420, redo lsn=0/210C3C8
+2026-08-02 16:37:10.370 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:37:18.085 +03 [27576] LOG:  checkpoint complete: wrote 70 buffers (0.4%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=7.656 s, sync=0.050 s, total=7.716 s; sync files=57, longest=0.002 s, average=0.001 s; distance=279 kB, estimate=406 kB; lsn=0/21539D8, redo lsn=0/2152358
+2026-08-02 16:42:10.087 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:42:14.297 +03 [27576] LOG:  checkpoint complete: wrote 38 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=4.162 s, sync=0.039 s, total=4.211 s; sync files=36, longest=0.004 s, average=0.002 s; distance=128 kB, estimate=378 kB; lsn=0/2172FA8, redo lsn=0/2172398
+2026-08-02 16:47:10.304 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:47:10.638 +03 [27576] LOG:  checkpoint complete: wrote 3 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.321 s, sync=0.005 s, total=0.335 s; sync files=3, longest=0.002 s, average=0.002 s; distance=28 kB, estimate=343 kB; lsn=0/2179418, redo lsn=0/21793C0
+2026-08-02 16:52:10.642 +03 [27576] LOG:  checkpoint starting: time
+2026-08-02 16:52:10.883 +03 [27576] LOG:  checkpoint complete: wrote 2 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.228 s, sync=0.004 s, total=0.241 s; sync files=3, longest=0.002 s, average=0.002 s; distance=12 kB, estimate=310 kB; lsn=0/217C640, redo lsn=0/217C5E8
+2026-08-02 17:02:18.225 +03 [9260] LOG:  io worker (PID 2484) was terminated by exception 0x40010004
+2026-08-02 17:02:18.225 +03 [9260] HINT:  See C include file "ntstatus.h" for a description of the hexadecimal value.
+2026-08-02 17:02:18.226 +03 [9260] LOG:  terminating any other active server processes
+2026-08-02 17:02:18.259 +03 [9260] LOG:  all server processes terminated; reinitializing
