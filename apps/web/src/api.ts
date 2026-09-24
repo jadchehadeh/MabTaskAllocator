@@ -244,7 +244,20 @@ async function request<T>(path: string, options: RequestInit = {}) {
       ...options.headers
     }
   });
-  const data = (await response.json()) as T & { message?: string };
+  const text = await response.text();
+  let data = {} as T & { message?: string };
+
+  if (text) {
+    try {
+      data = JSON.parse(text) as T & { message?: string };
+    } catch {
+      data = {
+        message: response.ok
+          ? "The server returned an unreadable response."
+          : "The server is reachable, but it did not return a valid application response."
+      } as T & { message?: string };
+    }
+  }
 
   if (!response.ok) {
     if (response.status === 401) setSession(null);
@@ -259,7 +272,15 @@ async function download(path: string, fallbackName: string) {
     headers: token ? { Authorization: `Bearer ${token}` } : {}
   });
   if (!response.ok) {
-    const data = await response.json().catch(() => ({ message: "The download failed." }));
+    const text = await response.text().catch(() => "");
+    let data: { message?: string } = { message: "The download failed." };
+    if (text) {
+      try {
+        data = JSON.parse(text) as { message?: string };
+      } catch {
+        data = { message: "The server did not return a valid download response." };
+      }
+    }
     if (response.status === 401) setSession(null);
     throw new Error(data.message ?? "The download failed.");
   }

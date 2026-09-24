@@ -22,7 +22,7 @@ const loginAttempts = new Map();
 const taskTypes = ["Technical", "QS", "Shop Drawings", "BIM", "Variation"];
 const connectionString =
   process.env.DATABASE_URL ??
-  "postgresql://mab_user:mab_password@localhost:5432/mab_task_allocator";
+  "postgresql://mab_user@localhost:55432/mab_task_allocator";
 
 mkdirSync(attachmentsPath, { recursive: true });
 

@@ -50,5 +50,6 @@ Uploaded attachments use a separate persistent volume so database backups and fi
 managed independently.
 
 The production web image serves the Vite build through Nginx and proxies `/api` to `API_UPSTREAM`.
-The root `vercel.json` provides the equivalent production build and Railway API proxy when the web
-frontend is deployed on Vercel.
+The root `vercel.json` provides the equivalent production build for the web frontend. If the
+frontend is deployed separately from the API, configure the host to route `/api` to your active API
+service.

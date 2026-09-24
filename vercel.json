@@ -6,10 +6,6 @@
   "outputDirectory": "apps/web/dist",
   "rewrites": [
     {
-      "source": "/api/:path*",
-      "destination": "https://api-production-23b88.up.railway.app/api/:path*"
-    },
-    {
       "source": "/:path*",
       "destination": "/index.html"
     }

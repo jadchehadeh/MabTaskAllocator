@@ -761,6 +761,7 @@ export function App() {
     memberIds: [] as string[]
   });
   const [projectMessage, setProjectMessage] = useState("");
+  const [taskSheetUploadProjectId, setTaskSheetUploadProjectId] = useState("");
   const [projectMemberDrafts, setProjectMemberDrafts] = useState<Record<string, string[]>>({});
   const [projectEditDrafts, setProjectEditDrafts] = useState<Record<string, { name: string; description: string }>>({});
   const [confirmation, setConfirmation] = useState<{
@@ -2168,6 +2169,16 @@ export function App() {
     } catch (error) {
       setProjectMessage(error instanceof Error ? error.message : "Could not import this task sheet.");
     }
+  }
+
+  async function importSelectedProjectCsv(file: File | undefined) {
+    if (!file) return;
+    const project = projects.find((item) => item.id === taskSheetUploadProjectId) ?? projects[0];
+    if (!project) {
+      setProjectMessage("Create or select a project before uploading a CSV task sheet.");
+      return;
+    }
+    await importProjectSheet(project, file);
   }
 
   async function exportProjectSheet(project: Project) {
@@ -3874,6 +3885,47 @@ export function App() {
               </form>
             ) : null}
             {projectMessage ? <p className="success-message">{projectMessage}</p> : null}
+            {canManagePeople ? (
+              <section className="csv-upload-card" aria-labelledby="project-csv-upload-title">
+                <div className="csv-upload-main">
+                  <div>
+                    <h3 id="project-csv-upload-title">Upload your task codes</h3>
+                    <p>Create a CSV file with project tasks ready for allocation.</p>
+                  </div>
+                  <div className="csv-upload-controls">
+                    <select
+                      aria-label="Project for CSV upload"
+                      onChange={(event) => setTaskSheetUploadProjectId(event.target.value)}
+                      value={taskSheetUploadProjectId || projects[0]?.id || ""}
+                    >
+                      {projects.length ? projects.map((project) => (
+                        <option key={project.id} value={project.id}>{project.name} - {project.department}</option>
+                      )) : <option value="">Create a project first</option>}
+                    </select>
+                    <label className="csv-upload-button">
+                      <Upload aria-hidden="true" size={16} />
+                      Upload CSV
+                      <input
+                        accept=".csv"
+                        disabled={!projects.length}
+                        onChange={(event) => {
+                          void importSelectedProjectCsv(event.target.files?.[0]);
+                          event.target.value = "";
+                        }}
+                        type="file"
+                      />
+                    </label>
+                  </div>
+                </div>
+                <ul className="csv-upload-rules">
+                  <li>No duplicate task codes or task names. Please randomize repeated work packages.</li>
+                  <li>Format your CSV file in plain text.</li>
+                  <li>Task names should be between 3-200 characters long.</li>
+                  <li>Use these columns: Task, Priority, Complexity, Due Date, Progress, Task Type, Assignees.</li>
+                  <li>One task per row. Assignees can be written by name or username.</li>
+                </ul>
+              </section>
+            ) : null}
             <div className="projects-grid">
               {projects.length ? projects.map((project) => {
                 const eligibleMembers = assignableUsers.filter((user) => sameDepartment(user.department, project.department));

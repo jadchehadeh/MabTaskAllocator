@@ -3936,6 +3936,85 @@ html[data-reduce-motion="true"] *::after {
   grid-column: 1 / -1;
 }
 
+.csv-upload-card {
+  background: #f8fafc;
+  border: 1px solid var(--mab-border);
+  border-radius: 8px;
+  display: grid;
+  gap: 18px;
+  margin-bottom: 18px;
+  padding: 24px;
+}
+
+.csv-upload-main {
+  align-items: start;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+}
+
+.csv-upload-main h3 {
+  color: var(--mab-text);
+  font-size: 24px;
+  line-height: 1.2;
+  margin: 0 0 10px;
+}
+
+.csv-upload-main p {
+  color: var(--mab-text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.csv-upload-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.csv-upload-controls select {
+  min-width: 240px;
+}
+
+.csv-upload-button {
+  align-items: center;
+  background: #fff;
+  border: 1px solid var(--mab-border);
+  border-radius: 8px;
+  color: var(--mab-text);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 800;
+  gap: 9px;
+  min-height: 38px;
+  padding: 0 14px;
+  transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.csv-upload-button:hover {
+  background: #eef7ff;
+  border-color: #b7d9ee;
+  box-shadow: 0 8px 18px rgba(17, 120, 184, 0.12);
+}
+
+.csv-upload-button input {
+  display: none;
+}
+
+.csv-upload-rules {
+  color: var(--mab-text-muted);
+  display: grid;
+  font-size: 12px;
+  gap: 8px;
+  line-height: 1.45;
+  margin: 0;
+  padding-left: 18px;
+}
+
 .projects-grid {
   display: grid;
   gap: 14px;
@@ -4483,9 +4562,21 @@ html[data-reduce-motion="true"] *::after {
 [data-theme="dark"] .productivity-card,
 [data-theme="dark"] .department-group,
 [data-theme="dark"] .project-card,
+[data-theme="dark"] .csv-upload-card,
 [data-theme="dark"] .confirmation-dialog {
   background: var(--mab-surface);
   color: var(--mab-text);
+}
+
+[data-theme="dark"] .csv-upload-button {
+  background: var(--mab-surface-soft);
+  border-color: var(--mab-border);
+  color: var(--mab-text);
+}
+
+[data-theme="dark"] .csv-upload-button:hover {
+  background: #123449;
+  border-color: #356785;
 }
 
 [data-theme="dark"] .brand-strip,
@@ -4698,6 +4789,17 @@ html[data-reduce-motion="true"] *::after {
 
   .task-view-tabs {
     grid-template-columns: 1fr;
+  }
+
+  .csv-upload-main,
+  .csv-upload-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .csv-upload-controls select,
+  .csv-upload-button {
+    width: 100%;
   }
 }
 
